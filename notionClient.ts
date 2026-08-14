@@ -10,7 +10,7 @@ export interface NotionClientOptions {
 export interface CreateChildPageOptions {
   parentPageId: string;
   title: string;
-  children: unknown[];
+  markdown: string;
   pushedAt: Date;
 }
 
@@ -204,7 +204,7 @@ export class NotionClient {
           ]
         }
       },
-      children: options.children
+      markdown: options.markdown
     };
 
     console.debug("[LLM Wiki Sync][Create page] HTTP method", "POST");

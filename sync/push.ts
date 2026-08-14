@@ -1,5 +1,4 @@
 ﻿import { Notice, type App } from "obsidian";
-import { markdownToNotionBlocks } from "../markdown/notionBlocks";
 import {
   extractNotionPageId,
   NotionApiError,
@@ -187,7 +186,7 @@ export async function pushCurrentNoteToNotion(options: PushCurrentNoteOptions): 
     const createdPage = await client.createChildPage({
       parentPageId,
       title: noteTitle,
-      children: markdownToNotionBlocks(markdownBody),
+      markdown: markdownBody,
       pushedAt
     });
 

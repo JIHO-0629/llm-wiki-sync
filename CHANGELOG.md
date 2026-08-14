@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+
+- Fixed new Notion page creation for Markdown documents with more than 100 blocks/sections.
+- Replaced the legacy custom Markdown-to-block conversion path with Notion API 2026-03-11 native Markdown page creation.
+- Preserved existing Notion page updates through `/v1/pages/{id}/markdown`.
+- Added a regression test that verifies large Markdown documents are sent without silent truncation.
+- Updated Obsidian Community Plugin metadata, including `minAppVersion` and `versions.json`.
+- Replaced background note writes with `Vault.process()` where sync writes fetched Notion content into local Markdown files.
+- Moved status bar cursor styling into `styles.css` and removed development-only production logging.
+
 ## 0.6.0
 
 - Added bidirectional Notion/Obsidian synchronization.

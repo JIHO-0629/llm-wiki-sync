@@ -37,9 +37,9 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-This plugin is not published yet.
+LLM Wiki Sync v0.7.0 is prepared as an Obsidian Community Plugin submission candidate.
 
-For local testing, place the plugin folder at:
+For manual installation or release-candidate testing, place the plugin folder at:
 
 ```text
 <vault>/.obsidian/plugins/llm-wiki-sync
@@ -118,6 +118,7 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 - Recursive nested page synchronization is not implemented.
 - Images and attachments are not synchronized.
 - Notion database/data-source synchronization is not supported.
+- Standalone `.yaml` and `.yml` files are not synchronized; Obsidian YAML frontmatter in Markdown notes is preserved for local mapping metadata.
 - Deletion synchronization is not implemented.
 - Conflict resolution selects one complete version rather than merging line-by-line.
 - The plugin is desktop-only because it relies on desktop-compatible bundled code and Node.js hashing.
@@ -142,7 +143,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.6.0
+0.7.0
 
 ## License
 
