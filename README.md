@@ -1,0 +1,149 @@
+# LLM Wiki Sync
+
+Bidirectional synchronization between Obsidian Markdown notes and Notion pages with explicit conflict protection.
+
+## Overview
+
+LLM Wiki Sync is an Obsidian desktop plugin for manual, safety-first synchronization between local Markdown notes and Notion pages. It is designed around stable page identity, persisted sync baselines, and explicit user decisions when both sides changed.
+
+## Features
+
+- Obsidian <-> Notion bidirectional note synchronization
+- Persistent `notion_page_id` mapping
+- Body synchronization
+- Title and filename synchronization
+- `Sync current note` automatic direction detection
+- Persisted synchronization baseline
+- Conflict detection
+- Explicit `Keep Obsidian` and `Keep Notion` resolution
+- Filename and path safety checks
+- Duplicate mapping protection
+- Network and API failure safety
+
+## How Synchronization Works
+
+Each linked note stores a `notion_page_id` in local frontmatter. The plugin uses that ID as the stable identity for the Notion page, so local filename changes do not break the mapping.
+
+After a successful full sync, the plugin stores a synchronization baseline in plugin data. The baseline contains independent local and remote fingerprints. Those fingerprints include both title and body content.
+
+On the next sync, LLM Wiki Sync compares the current local state against the baseline local state, and the current Notion state against the baseline remote state. It uses one four-state model:
+
+- `CLEAN`
+- `LOCAL_ONLY_CHANGED`
+- `REMOTE_ONLY_CHANGED`
+- `CONFLICT`
+
+`Sync current note` pushes or pulls only when one side changed. If both sides changed, it stops and asks the user to choose which version to keep.
+
+## Installation
+
+This plugin is not published yet.
+
+For local testing, place the plugin folder at:
+
+```text
+<vault>/.obsidian/plugins/llm-wiki-sync
+```
+
+Then enable it from Obsidian Settings -> Community plugins.
+
+## Notion Setup
+
+1. Create a Notion integration.
+2. Give the integration access to the root page you want to sync under.
+3. Copy the integration API token.
+4. Copy the Notion root page URL or page ID.
+
+Use a placeholder such as `YOUR_NOTION_TOKEN` in examples. Do not commit real tokens.
+
+## First-Time Setup
+
+1. Open Settings -> LLM Wiki Sync.
+2. Paste the Notion API token.
+3. Enter the Notion root page URL or ID.
+4. Click `Test Notion connection`.
+
+For old notes that already have `notion_page_id` but no v0.6 baseline, run `Initialize sync baseline` once before normal syncing.
+
+## Normal Usage
+
+1. Open an Obsidian note.
+2. Click `Sync current note`.
+3. If a conflict appears, choose which version to keep:
+   - `Keep Obsidian`
+   - `Keep Notion`
+
+Unlinked local notes are created as child pages under the configured Notion root page. Linked notes sync in the safe direction determined by the baseline state.
+
+## Conflict Handling
+
+The plugin does not automatically merge or choose the newest version. If both Obsidian and Notion changed since the last baseline, sync is blocked.
+
+Use:
+
+- `Resolve conflict — Keep Obsidian`
+- `Resolve conflict — Keep Notion`
+
+After a successful resolution, the baseline is refreshed and the state returns to clean.
+
+## Advanced Commands
+
+Advanced commands remain available from the command palette:
+
+- `Push to Notion`
+- `Pull from Notion`
+- `Initialize sync baseline`
+- `Debug active mapping`
+- `Debug sync state`
+
+These are intended for troubleshooting, migration, and explicit manual control. `Sync current note` is the recommended normal workflow.
+
+## Safety Model
+
+LLM Wiki Sync is designed to avoid silent overwrites:
+
+- `notion_page_id` is the canonical mapping key.
+- Duplicate local mappings are blocked.
+- Current local and remote states are compared only against the persisted baseline.
+- Conflict state never writes either side.
+- Baselines advance only after complete successful operations.
+- Rename collisions stop the rename and do not overwrite files.
+- Filenames are sanitized for Windows/path safety and path traversal protection.
+- Failed API calls do not create a fake clean state.
+
+## Known Limitations
+
+- Sync is manual, not background or real-time.
+- The normal workflow targets direct pages under the configured root page.
+- Recursive nested page synchronization is not implemented.
+- Images and attachments are not synchronized.
+- Notion database/data-source synchronization is not supported.
+- Deletion synchronization is not implemented.
+- Conflict resolution selects one complete version rather than merging line-by-line.
+- The plugin is desktop-only because it relies on desktop-compatible bundled code and Node.js hashing.
+
+## Privacy / Network Access
+
+The Notion token is stored through Obsidian SecretStorage when available. It is not stored in plugin `data.json`.
+
+The plugin sends requests to the Notion API only when the user runs connection testing, sync, pull, push, baseline initialization, debug lookup, or conflict resolution commands. It does not use analytics or telemetry.
+
+Plugin `data.json` may contain Notion page IDs, root page configuration, sync baselines, and fingerprints. Do not publish user-specific plugin data.
+
+## Development / Build
+
+From the plugin folder:
+
+```bash
+npm run build
+```
+
+The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated release/build artifact according to the repository release workflow.
+
+## Version
+
+0.6.0
+
+## License
+
+LLM Wiki Sync is licensed under the GNU General Public License v3.0 (`GPL-3.0-only`).

@@ -1,0 +1,10 @@
+node_modules/
+data.json
+.env
+.env.*
+*.map
+.DS_Store
+tsconfig.typecheck.tmp.json
+
+# Generated local Obsidian plugin bundle. Keep locally for testing/release packaging.
+main.js

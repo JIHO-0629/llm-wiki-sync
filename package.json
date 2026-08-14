@@ -1,0 +1,26 @@
+{
+  "name": "llm-wiki-sync",
+  "version": "0.6.0",
+  "description": "Bidirectional Obsidian and Notion synchronization with explicit conflict protection.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node build.cjs",
+    "test:file-name": "node tests/fileName.test.mjs",
+    "test:baseline": "node tests/baseline.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "notion",
+    "sync"
+  ],
+  "author": "JIHO-0629",
+  "license": "GPL-3.0-only",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.23.0",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.5.4"
+  }
+}
