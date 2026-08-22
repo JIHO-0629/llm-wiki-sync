@@ -323,13 +323,16 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "LLM Wiki Sync" });
-    containerEl.createEl("p", { text: "Notion ↔ Obsidian synchronization" });
-    containerEl.createEl("p", { text: `Version: ${VERSION_LABEL}` });
+
+    new Setting(containerEl)
+      .setName("Version")
+      .setDesc(VERSION_LABEL);
 
     const savedToken = this.plugin.getNotionToken();
 
-    containerEl.createEl("h3", { text: "Notion connection" });
+    new Setting(containerEl)
+      .setName("Notion connection")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Notion API token")
@@ -381,7 +384,9 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    containerEl.createEl("h3", { text: "Sync" });
+    new Setting(containerEl)
+      .setName("Sync")
+      .setHeading();
     containerEl.createEl("p", { text: "Normal use: 1. Open a note 2. Click Sync current note 3. If a conflict appears, choose which version to keep." });
 
     new Setting(containerEl)
@@ -400,11 +405,13 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    containerEl.createEl("h3", { text: "Advanced" });
+    new Setting(containerEl)
+      .setName("Advanced")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Troubleshooting tools")
-      .setDesc("Push, Pull, baseline initialization, conflict resolution, and debug commands remain available from the command palette.");
+      .setDesc("Push, pull, baseline initialization, conflict resolution, and debug commands remain available from the command palette.");
 
     new Setting(containerEl)
       .setName("Verbose debug logging")
