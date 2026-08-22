@@ -15,6 +15,13 @@ import { initializeSyncBaseline } from "./sync/initializeBaseline";
 import { resolveConflict } from "./sync/resolveConflict";
 import { syncCurrentNote } from "./sync/syncCurrentNote";
 import {
+  HierarchyAuditModal,
+  auditWorkspaceHierarchy,
+  initializeWorkspaceMappings,
+  repairWorkspaceHierarchy,
+  type HierarchyScope
+} from "./sync/hierarchy";
+import {
   SYNC_STATE_VERSION,
   validateSyncBaseline,
   type SyncBaseline,
@@ -97,6 +104,38 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       name: "LLM Wiki Sync: Push entire vault to Notion",
       callback: () => {
         this.confirmPushEntireVaultToNotion();
+      }
+    });
+
+    this.addCommand({
+      id: "audit-current-folder-hierarchy",
+      name: "LLM Wiki Sync: Audit current folder hierarchy",
+      callback: () => {
+        void this.auditWorkspaceHierarchy("current-folder");
+      }
+    });
+
+    this.addCommand({
+      id: "audit-entire-vault-hierarchy",
+      name: "LLM Wiki Sync: Audit entire vault hierarchy",
+      callback: () => {
+        void this.auditWorkspaceHierarchy("entire-vault");
+      }
+    });
+
+    this.addCommand({
+      id: "initialize-current-folder-mappings",
+      name: "LLM Wiki Sync: Initialize current folder mappings",
+      callback: () => {
+        void this.initializeWorkspaceMappings("current-folder");
+      }
+    });
+
+    this.addCommand({
+      id: "initialize-entire-vault-mappings",
+      name: "LLM Wiki Sync: Initialize entire vault mappings",
+      callback: () => {
+        void this.initializeWorkspaceMappings("entire-vault");
       }
     });
 
@@ -377,6 +416,50 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       store: this
     });
   }
+
+  async auditWorkspaceHierarchy(scope: HierarchyScope): Promise<void> {
+    const result = await auditWorkspaceHierarchy({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this,
+      scope
+    });
+    if (!result) {
+      return;
+    }
+    new HierarchyAuditModal(this.app, result, () => {
+      new RepairHierarchyModal(this, scope).open();
+    }).open();
+  }
+
+  async repairWorkspaceHierarchy(scope: HierarchyScope): Promise<void> {
+    const summary = await repairWorkspaceHierarchy({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this,
+      scope
+    });
+    if (!summary) {
+      return;
+    }
+    new Notice(`LLM Wiki Sync: Repair complete - folders created ${summary.foldersCreated}, folder mappings repaired ${summary.folderMappingsRepaired}, pages moved ${summary.pagesMoved}, already correct ${summary.alreadyCorrect}, failed ${summary.failed}, skipped ${summary.skipped}.`);
+  }
+
+  async initializeWorkspaceMappings(scope: HierarchyScope): Promise<void> {
+    const summary = await initializeWorkspaceMappings({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this,
+      scope
+    });
+    if (!summary) {
+      return;
+    }
+    new Notice(`LLM Wiki Sync: Mapping initialization complete - baselines initialized ${summary.baselinesInitialized}, already initialized ${summary.alreadyInitialized}, unmapped ${summary.unmapped}, ambiguous ${summary.ambiguous}, failed ${summary.failed}.`);
+  }
 }
 
 class PushEntireVaultModal extends Modal {
@@ -411,6 +494,47 @@ class PushEntireVaultModal extends Modal {
           .onClick(() => {
             this.close();
             void this.plugin.pushEntireVaultToNotion();
+          });
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+class RepairHierarchyModal extends Modal {
+  private plugin: LlmWikiSyncPlugin;
+  private hierarchyScope: HierarchyScope;
+
+  constructor(plugin: LlmWikiSyncPlugin, scope: HierarchyScope) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.hierarchyScope = scope;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    new Setting(contentEl)
+      .setName("Repair hierarchy")
+      .setHeading();
+    new Setting(contentEl)
+      .setName("This will create missing Notion folder pages, repair folder mappings, and move linked Notion pages to their expected folder parents.")
+      .setDesc("It will not overwrite note content, resolve conflicts, delete pages, or create duplicates for valid notion_page_id mappings.");
+    new Setting(contentEl)
+      .addButton((button) => {
+        button
+          .setButtonText("Cancel")
+          .onClick(() => this.close());
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Repair hierarchy")
+          .setCta()
+          .onClick(() => {
+            this.close();
+            void this.plugin.repairWorkspaceHierarchy(this.hierarchyScope);
           });
       });
   }
@@ -533,6 +657,42 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
           .setButtonText("Push entire vault")
           .onClick(() => {
             this.plugin.confirmPushEntireVaultToNotion();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Audit hierarchy")
+      .setDesc("Read-only check for folder mappings and linked note parents.")
+      .addButton((button) => {
+        button
+          .setButtonText("Audit current folder")
+          .onClick(() => {
+            void this.plugin.auditWorkspaceHierarchy("current-folder");
+          });
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Audit entire vault")
+          .onClick(() => {
+            void this.plugin.auditWorkspaceHierarchy("entire-vault");
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Initialize mappings")
+      .setDesc("Validate linked notes and initialize missing baselines without overwriting content.")
+      .addButton((button) => {
+        button
+          .setButtonText("Initialize current folder")
+          .onClick(() => {
+            void this.plugin.initializeWorkspaceMappings("current-folder");
+          });
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Initialize entire vault")
+          .onClick(() => {
+            void this.plugin.initializeWorkspaceMappings("entire-vault");
           });
       });
 

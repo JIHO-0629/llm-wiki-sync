@@ -29,6 +29,7 @@ export type PushFileStatus =
   | "clean"
   | "remote_changed"
   | "conflict"
+  | "misplaced"
   | "failed";
 
 export interface PushFileResult {
@@ -44,6 +45,7 @@ export interface PushFileToNotionOptions {
   file: TFile;
   client: NotionClient;
   parentPageId: string | null;
+  expectedParentPageId?: string | null;
   baselineStore: SyncBaselineStore;
   runId?: string;
 }
@@ -134,6 +136,26 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
 
   console.debug(`${options.logPrefix} Mode: update`);
   console.debug(`${options.logPrefix} notion_page_id:`, options.pageId);
+
+  if (options.expectedParentPageId) {
+    try {
+      const pageDetails = await options.client.getPageDetails(options.pageId);
+      if (
+        pageDetails.parentType !== "page_id" ||
+        normalizePageId(pageDetails.parentPageId) !== normalizePageId(options.expectedParentPageId)
+      ) {
+        return {
+          status: "misplaced",
+          filePath: options.file.path,
+          pageId: options.pageId,
+          message: `Notion page is under ${pageDetails.parentPageId || pageDetails.parentType || "unknown parent"} instead of ${options.expectedParentPageId}.`
+        };
+      }
+    } catch (error) {
+      console.error(`${options.logPrefix} hierarchy parent check failed`, getErrorMessage(error));
+      return fail(options.file, "Push aborted - could not verify Notion page hierarchy.", options.pageId, error);
+    }
+  }
 
   let baseline;
   try {

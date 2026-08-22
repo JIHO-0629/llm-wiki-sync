@@ -1,4 +1,4 @@
-import { Notice, normalizePath, type App, type TFile } from "obsidian";
+import { Modal, Notice, normalizePath, Setting, type App, type TFile } from "obsidian";
 import { extractNotionPageId, NotionApiError, NotionClient } from "../notionClient";
 import type { SyncBaselineStore } from "./baseline";
 import { pushFileToNotion, type PushFileResult } from "./push";
@@ -29,8 +29,10 @@ export interface BulkPushCounts {
   clean: number;
   remoteChanged: number;
   conflicts: number;
+  misplaced: number;
   failed: number;
   foldersCreated: number;
+  folderMappingsRepaired: number;
 }
 
 export interface BulkPushResult {
@@ -125,6 +127,7 @@ async function pushSelectedFilesToNotion(options: BulkPushOptions, selection: { 
         file,
         client,
         parentPageId,
+        expectedParentPageId: parentPageId,
         baselineStore: options.store,
         runId
       });
@@ -145,6 +148,37 @@ async function pushSelectedFilesToNotion(options: BulkPushOptions, selection: { 
   }
 
   new Notice(formatBulkPushSummary(counts));
+  new BulkPushResultModal(options.app, selection.label, { counts, files: fileResults }).open();
+}
+
+class BulkPushResultModal extends Modal {
+  private readonly label: string;
+  private readonly result: BulkPushResult;
+
+  constructor(app: App, label: string, result: BulkPushResult) {
+    super(app);
+    this.label = label;
+    this.result = result;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    new Setting(contentEl)
+      .setName(`Bulk push results: ${this.label}`)
+      .setHeading();
+    contentEl.createEl("pre", { text: formatBulkPushDetails(this.result) });
+    new Setting(contentEl)
+      .addButton((button) => {
+        button
+          .setButtonText("Close")
+          .onClick(() => this.close());
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 async function ensureFolderPage(options: {
@@ -162,26 +196,35 @@ async function ensureFolderPage(options: {
   }
 
   const mappingKey = getFolderMappingKey(options.normalizedRootPageId, normalizedFolderPath);
-  const storedMapping = getStoredFolderMapping(options.store, mappingKey, normalizedFolderPath, options.normalizedRootPageId);
-  if (storedMapping) {
-    try {
-      await options.client.getPageDetails(storedMapping.notionPageId);
-      return storedMapping.notionPageId;
-    } catch (error) {
-      throw new Error(`Stored folder mapping is inaccessible for ${normalizedFolderPath}: ${getErrorMessage(error)}`);
-    }
-  }
-
   const parentFolderPath = getFolderPath(normalizedFolderPath);
   const parentPageId = await ensureFolderPage({
     ...options,
     folderPath: parentFolderPath
   });
-  const title = getBaseName(normalizedFolderPath);
+  const expectedTitle = getBaseName(normalizedFolderPath);
+  const storedMapping = getStoredFolderMapping(options.store, mappingKey, normalizedFolderPath, options.normalizedRootPageId);
+  if (storedMapping) {
+    const validation = await validateStoredFolderMapping({
+      client: options.client,
+      mapping: storedMapping,
+      rootPageId: options.normalizedRootPageId,
+      expectedParentPageId: parentPageId,
+      expectedTitle
+    });
+    if (validation.status === "matched") {
+      return storedMapping.notionPageId;
+    }
+    console.warn(
+      `[LLM Wiki Sync][Bulk Push][${options.runId}] folder mapping hierarchy mismatch:`,
+      normalizedFolderPath,
+      validation.reason
+    );
+  }
+
   const pushedAt = new Date();
   const createdPage = await options.client.createChildPage({
     parentPageId,
-    title,
+    title: expectedTitle,
     markdown: "",
     pushedAt
   });
@@ -191,9 +234,44 @@ async function ensureFolderPage(options: {
     lastKnownPath: normalizedFolderPath,
     rootPageId: options.normalizedRootPageId
   });
+  if (storedMapping) {
+    options.counts.folderMappingsRepaired += 1;
+  }
   options.counts.foldersCreated += 1;
   console.debug(`[LLM Wiki Sync][Bulk Push][${options.runId}] folder created:`, normalizedFolderPath, createdPage.id);
   return createdPage.id;
+}
+
+type FolderMappingValidation =
+  | { status: "matched" }
+  | { status: "hierarchy_mismatch"; reason: string };
+
+async function validateStoredFolderMapping(options: {
+  client: NotionClient;
+  mapping: FolderMapping;
+  rootPageId: string;
+  expectedParentPageId: string;
+  expectedTitle: string;
+}): Promise<FolderMappingValidation> {
+  if (!isMappingForRoot(options.mapping, options.rootPageId)) {
+    return { status: "hierarchy_mismatch", reason: "root page mismatch" };
+  }
+
+  try {
+    const details = await options.client.getPageDetails(options.mapping.notionPageId);
+    if (details.title !== options.expectedTitle) {
+      return { status: "hierarchy_mismatch", reason: `title mismatch: expected ${options.expectedTitle}, got ${details.title || "untitled"}` };
+    }
+    if (
+      details.parentType !== "page_id" ||
+      normalizeNotionPageId(details.parentPageId) !== normalizeNotionPageId(options.expectedParentPageId)
+    ) {
+      return { status: "hierarchy_mismatch", reason: `parent mismatch: expected ${options.expectedParentPageId}, got ${details.parentPageId || details.parentType || "missing"}` };
+    }
+    return { status: "matched" };
+  } catch (error) {
+    return { status: "hierarchy_mismatch", reason: `inaccessible: ${getErrorMessage(error)}` };
+  }
 }
 
 function isBulkPushMarkdownFile(file: TFile, rootFolderPath: string): boolean {
@@ -217,7 +295,7 @@ function isExcludedPath(path: string): boolean {
   return EXCLUDED_TOP_LEVEL_FOLDERS.has(topLevel);
 }
 
-function getFolderPath(path: string): string {
+export function getFolderPath(path: string): string {
   const normalized = normalizeVaultFolderPath(path);
   const index = normalized.lastIndexOf("/");
   if (index === -1) {
@@ -227,7 +305,7 @@ function getFolderPath(path: string): string {
   return normalized.slice(0, index);
 }
 
-function getBaseName(path: string): string {
+export function getBaseName(path: string): string {
   const normalized = normalizeVaultFolderPath(path);
   const index = normalized.lastIndexOf("/");
   return index === -1 ? normalized : normalized.slice(index + 1);
@@ -256,11 +334,11 @@ function isMappingForRoot(mapping: FolderMapping | null, rootPageId: string): ma
   return Boolean(mapping && normalizeNotionPageId(mapping.rootPageId) === rootPageId);
 }
 
-function getFolderMappingKey(rootPageId: string, folderPath: string): string {
+export function getFolderMappingKey(rootPageId: string, folderPath: string): string {
   return `${rootPageId}::${folderPath}`;
 }
 
-function normalizeNotionPageId(pageId: string): string {
+export function normalizeNotionPageId(pageId: string): string {
   return pageId.replace(/-/g, "").toLowerCase();
 }
 
@@ -270,6 +348,7 @@ function applyFileResult(counts: BulkPushCounts, result: PushFileResult): void {
   else if (result.status === "clean") counts.clean += 1;
   else if (result.status === "remote_changed") counts.remoteChanged += 1;
   else if (result.status === "conflict") counts.conflicts += 1;
+  else if (result.status === "misplaced") counts.misplaced += 1;
   else counts.failed += 1;
 }
 
@@ -280,13 +359,23 @@ function createEmptyCounts(): BulkPushCounts {
     clean: 0,
     remoteChanged: 0,
     conflicts: 0,
+    misplaced: 0,
     failed: 0,
-    foldersCreated: 0
+    foldersCreated: 0,
+    folderMappingsRepaired: 0
   };
 }
 
 function formatBulkPushSummary(counts: BulkPushCounts): string {
-  return `LLM Wiki Sync: Bulk push complete - created ${counts.created}, updated ${counts.updated}, clean ${counts.clean}, remote changed ${counts.remoteChanged}, conflicts ${counts.conflicts}, failed ${counts.failed}, folders created ${counts.foldersCreated}.`;
+  return `LLM Wiki Sync: Bulk push complete - created ${counts.created}, updated ${counts.updated}, clean ${counts.clean}, remote changed ${counts.remoteChanged}, conflicts ${counts.conflicts}, misplaced ${counts.misplaced}, failed ${counts.failed}, folders created ${counts.foldersCreated}, folder mappings repaired ${counts.folderMappingsRepaired}.`;
+}
+
+function formatBulkPushDetails(result: BulkPushResult): string {
+  const lines = [formatBulkPushSummary(result.counts), ""];
+  for (const file of result.files) {
+    lines.push(`${file.status.toUpperCase()} ${file.filePath}${file.message ? ` - ${file.message}` : ""}`);
+  }
+  return lines.join("\n");
 }
 
 function reportRootFailure(error: unknown): void {

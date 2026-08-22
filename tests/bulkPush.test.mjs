@@ -19,6 +19,7 @@ const notices = [];
 const pages = new Map();
 const createRequests = [];
 const markdownPatches = [];
+const moveRequests = [];
 let nextPageId = 1;
 const ROOT_PAGE_ID = "11111111-1111-1111-1111-111111111111";
 const ROOT_B_PAGE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -27,6 +28,23 @@ class Notice {
   constructor(message) {
     notices.push(message);
   }
+}
+
+class Modal {
+  constructor(app) {
+    this.app = app;
+    this.contentEl = { empty() {}, createEl() {} };
+  }
+  open() {}
+  close() {}
+}
+
+class Setting {
+  constructor() {}
+  setName() { return this; }
+  setDesc() { return this; }
+  setHeading() { return this; }
+  addButton() { return this; }
 }
 
 function normalizePath(input) {
@@ -51,6 +69,20 @@ async function requestUrl(request) {
     return ok(pageDetails(page));
   }
 
+  if (request.method === "GET" && request.url.includes("/v1/blocks/") && request.url.includes("/children")) {
+    const parentPageId = decodeURIComponent(request.url.match(/\/v1\/blocks\/([^/?]+)\/children/)[1]);
+    getPageOrThrow(parentPageId);
+    const results = Array.from(pages.values())
+      .filter((page) => page.parentPageId === parentPageId && page.parentType === "page_id")
+      .map((page) => ({
+        object: "block",
+        id: page.id,
+        type: "child_page",
+        child_page: { title: page.title }
+      }));
+    return ok({ object: "list", results, has_more: false, next_cursor: null });
+  }
+
   if (request.method === "POST" && request.url.endsWith("/v1/pages")) {
     const body = JSON.parse(request.body);
     const title = body.properties.title.title[0].text.content;
@@ -73,6 +105,18 @@ async function requestUrl(request) {
     pages.set(id, page);
     createRequests.push({ title, parentPageId, markdown: body.markdown, hasChildren: Object.prototype.hasOwnProperty.call(body, "children") });
     return ok(createdPageBody(page));
+  }
+
+  if (request.method === "POST" && request.url.includes("/v1/pages/") && request.url.endsWith("/move")) {
+    const pageId = decodeURIComponent(request.url.match(/\/v1\/pages\/([^/]+)\/move$/)[1]);
+    const page = getPageOrThrow(pageId);
+    const body = JSON.parse(request.body);
+    const parentPageId = body.parent.page_id;
+    getPageOrThrow(parentPageId);
+    page.parentPageId = parentPageId;
+    page.lastEditedTime = new Date().toISOString();
+    moveRequests.push({ pageId, parentPageId });
+    return ok(pageDetails(page));
   }
 
   if (request.method === "PATCH" && request.url.endsWith("/markdown")) {
@@ -142,7 +186,7 @@ function createdPageBody(page) {
   };
 }
 
-const obsidianMock = { Notice, normalizePath, requestUrl };
+const obsidianMock = { Notice, Modal, Setting, normalizePath, requestUrl };
 
 function loadModule(entryPoint) {
   const result = esbuild.buildSync({
@@ -161,6 +205,7 @@ function loadModule(entryPoint) {
 
 const { pushEntireVaultToNotion, selectBulkPushMarkdownFiles } = loadModule("sync/bulkPush.ts");
 const { pushCurrentNoteToNotion } = loadModule("sync/push.ts");
+const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMappings } = loadModule("sync/hierarchy.ts");
 
 function makeFile(filePath, content) {
   const extension = filePath.includes(".") ? filePath.split(".").pop() : "";
@@ -294,6 +339,7 @@ pages.clear();
 notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
+moveRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 addPage("clean-page", "Clean", "clean\n");
@@ -425,6 +471,109 @@ pages.clear();
 notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
+moveRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("test-folder", "test", "", ROOT_PAGE_ID);
+addPage("correct-korean-folder", "시험의 시험", "", "test-folder");
+addPage("wrong-korean-folder", "시험의 시험", "", ROOT_PAGE_ID);
+addPage("wrong-title-folder", "틀린 제목", "", "test-folder");
+addPage("misplaced-note", "시험", "linked body\n", ROOT_PAGE_ID);
+addPage("ambiguous-a", "Ambiguous", "a\n", "correct-korean-folder");
+addPage("ambiguous-b", "Ambiguous", "b\n", "correct-korean-folder");
+const hierarchyFiles = [
+  makeFile("test/시험의 시험/시험.md", "---\nnotion_page_id: \"misplaced-note\"\n---\n\nlinked body\n"),
+  makeFile("test/시험의 시험의 시험/반갑습니다.md", "hello\n"),
+  makeFile("test/시험의 시험/Ambiguous.md", "ambiguous local\n")
+];
+const hierarchyApp = createApp(hierarchyFiles, "test/시험의 시험/시험.md");
+const hierarchyStore = makeStore();
+hierarchyStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test")] = {
+  notionPageId: "test-folder",
+  lastKnownPath: "test",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+hierarchyStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험")] = {
+  notionPageId: "wrong-korean-folder",
+  lastKnownPath: "test/시험의 시험",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+hierarchyStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험의 시험")] = {
+  notionPageId: "wrong-title-folder",
+  lastKnownPath: "test/시험의 시험의 시험",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+const auditBeforeWrites = {
+  creates: createRequests.length,
+  patches: markdownPatches.length,
+  moves: moveRequests.length,
+  mappings: Object.keys(hierarchyStore.folderMappings).length,
+  baselines: Object.keys(hierarchyStore.baselines).length
+};
+const audit = await auditWorkspaceHierarchy({
+  app: hierarchyApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: hierarchyStore,
+  scope: "entire-vault"
+});
+assert.ok(audit);
+assert.ok(audit.items.some((item) => item.kind === "folder" && item.path === "test/시험의 시험" && item.status === "INVALID_FOLDER_MAPPING"));
+assert.ok(audit.items.some((item) => item.kind === "folder" && item.path === "test/시험의 시험의 시험" && item.status === "INVALID_FOLDER_MAPPING"));
+assert.ok(audit.items.some((item) => item.kind === "note" && item.path === "test/시험의 시험/시험.md" && item.status === "MISPLACED"));
+assert.ok(audit.items.some((item) => item.kind === "note" && item.path === "test/시험의 시험/Ambiguous.md" && item.status === "AMBIGUOUS"));
+assert.deepEqual({
+  creates: createRequests.length,
+  patches: markdownPatches.length,
+  moves: moveRequests.length,
+  mappings: Object.keys(hierarchyStore.folderMappings).length,
+  baselines: Object.keys(hierarchyStore.baselines).length
+}, auditBeforeWrites);
+
+const repair = await repairWorkspaceHierarchy({
+  app: hierarchyApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: hierarchyStore,
+  scope: "entire-vault"
+});
+assert.ok(repair);
+assert.equal(hierarchyStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험")].notionPageId, "correct-korean-folder");
+assert.equal(pages.get("misplaced-note").parentPageId, "correct-korean-folder");
+assert.equal(hierarchyFiles[0].content.includes("notion_page_id: \"misplaced-note\""), true);
+assert.equal(moveRequests.length, 1);
+assert.equal(moveRequests[0].pageId, "misplaced-note");
+assert.ok(createRequests.some((request) => request.title === "시험의 시험의 시험" && request.parentPageId === "test-folder"));
+const createCountAfterRepair = createRequests.length;
+const moveCountAfterRepair = moveRequests.length;
+const secondRepair = await repairWorkspaceHierarchy({
+  app: hierarchyApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: hierarchyStore,
+  scope: "entire-vault"
+});
+assert.ok(secondRepair);
+assert.equal(createRequests.length, createCountAfterRepair);
+assert.equal(moveRequests.length, moveCountAfterRepair);
+
+const init = await initializeWorkspaceMappings({
+  app: hierarchyApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: hierarchyStore,
+  scope: "entire-vault"
+});
+assert.ok(init);
+assert.equal(init.baselinesInitialized, 1);
+assert.equal(init.ambiguous, 1);
+assert.ok(hierarchyStore.baselines[normalizePageId("misplaced-note")]);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 const singleFile = makeFile("Single.md", "single\n");
