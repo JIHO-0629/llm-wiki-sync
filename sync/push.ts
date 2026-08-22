@@ -30,6 +30,7 @@ export type PushFileStatus =
   | "clean"
   | "remote_changed"
   | "conflict"
+  | "ambiguous"
   | "misplaced"
   | "failed";
 
@@ -285,6 +286,11 @@ async function createFileInNotion(options: PushFileToNotionOptions & {
   }
 
   try {
+    const adoption = await tryAdoptExistingChildPage(options);
+    if (adoption) {
+      return adoption;
+    }
+
     const pushedAt = new Date();
     await options.client.getPage(options.parentPageId);
     const createdPage = await options.client.createChildPage({
@@ -326,6 +332,40 @@ async function createFileInNotion(options: PushFileToNotionOptions & {
   }
 }
 
+async function tryAdoptExistingChildPage(options: PushFileToNotionOptions & {
+  runId: string;
+  noteTitle: string;
+}): Promise<PushFileResult | null> {
+  const candidates = (await options.client.listChildPages(options.parentPageId ?? "", "Hierarchy"))
+    .filter((page) => page.title === options.noteTitle);
+  if (candidates.length === 0) {
+    return null;
+  }
+  if (candidates.length > 1) {
+    return ambiguous(options.file, "AMBIGUOUS - multiple same-title Notion pages exist under the expected parent.");
+  }
+
+  const localSnapshot = await getLocalSyncSnapshot(options.app, options.file);
+  const remoteSnapshot = await getRemoteSyncSnapshot(options.client, candidates[0].id);
+  if (localSnapshot.fingerprint !== remoteSnapshot.fingerprint) {
+    return ambiguous(options.file, "AMBIGUOUS - same-title Notion page content differs from the local note.", candidates[0].id);
+  }
+
+  await setNotionPageMapping(options.app, options.file, candidates[0].id);
+  const nextLocalSnapshot = await getLocalSyncSnapshot(options.app, options.file);
+  await options.baselineStore.saveSyncBaseline(
+    candidates[0].id,
+    createSyncBaseline(candidates[0].id, nextLocalSnapshot, remoteSnapshot)
+  );
+  console.debug(`[LLM Wiki Sync][Baseline][${options.runId}] initialized from existing Notion page`, candidates[0].id);
+  return {
+    status: "clean",
+    filePath: options.file.path,
+    pageId: candidates[0].id,
+    message: "Linked existing same-title Notion page with matching content."
+  };
+}
+
 function showSinglePushNotice(result: PushFileResult): void {
   if (result.status === "clean") {
     new Notice("LLM Wiki Sync: Already in sync.");
@@ -358,6 +398,15 @@ function fail(file: TFile, message: string, pageId?: string, error?: unknown): P
     pageId,
     message,
     error
+  };
+}
+
+function ambiguous(file: TFile, message: string, pageId?: string): PushFileResult {
+  return {
+    status: "ambiguous",
+    filePath: file.path,
+    pageId,
+    message
   };
 }
 

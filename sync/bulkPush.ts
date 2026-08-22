@@ -29,6 +29,7 @@ export interface BulkPushCounts {
   clean: number;
   remoteChanged: number;
   conflicts: number;
+  ambiguous: number;
   misplaced: number;
   failed: number;
   foldersCreated: number;
@@ -41,7 +42,8 @@ export interface BulkPushResult {
 }
 
 const PULL_FOLDER = "LLM Wiki Sync Pull";
-const EXCLUDED_TOP_LEVEL_FOLDERS = new Set([".obsidian", PULL_FOLDER]);
+const REVIEW_FOLDER = "LLM Wiki Sync Review";
+const EXCLUDED_TOP_LEVEL_FOLDERS = new Set([".obsidian", PULL_FOLDER, REVIEW_FOLDER]);
 
 export async function pushCurrentFolderToNotion(options: BulkPushOptions): Promise<void> {
   const activeFile = options.app.workspace.getActiveFile();
@@ -348,6 +350,7 @@ function applyFileResult(counts: BulkPushCounts, result: PushFileResult): void {
   else if (result.status === "clean") counts.clean += 1;
   else if (result.status === "remote_changed") counts.remoteChanged += 1;
   else if (result.status === "conflict") counts.conflicts += 1;
+  else if (result.status === "ambiguous") counts.ambiguous += 1;
   else if (result.status === "misplaced") counts.misplaced += 1;
   else counts.failed += 1;
 }
@@ -359,6 +362,7 @@ function createEmptyCounts(): BulkPushCounts {
     clean: 0,
     remoteChanged: 0,
     conflicts: 0,
+    ambiguous: 0,
     misplaced: 0,
     failed: 0,
     foldersCreated: 0,
@@ -367,7 +371,7 @@ function createEmptyCounts(): BulkPushCounts {
 }
 
 function formatBulkPushSummary(counts: BulkPushCounts): string {
-  return `LLM Wiki Sync: Bulk push complete - created ${counts.created}, updated ${counts.updated}, clean ${counts.clean}, remote changed ${counts.remoteChanged}, conflicts ${counts.conflicts}, misplaced ${counts.misplaced}, failed ${counts.failed}, folders created ${counts.foldersCreated}, folder mappings repaired ${counts.folderMappingsRepaired}.`;
+  return `LLM Wiki Sync: Bulk push complete - created ${counts.created}, updated ${counts.updated}, clean ${counts.clean}, remote changed ${counts.remoteChanged}, conflicts ${counts.conflicts}, ambiguous ${counts.ambiguous}, misplaced ${counts.misplaced}, failed ${counts.failed}, folders created ${counts.foldersCreated}, folder mappings repaired ${counts.folderMappingsRepaired}.`;
 }
 
 function formatBulkPushDetails(result: BulkPushResult): string {

@@ -217,9 +217,11 @@ function loadModule(entryPoint) {
 }
 
 const { pushEntireVaultToNotion, selectBulkPushMarkdownFiles } = loadModule("sync/bulkPush.ts");
-const { pushCurrentNoteToNotion } = loadModule("sync/push.ts");
+const { pushCurrentNoteToNotion, pushFileToNotion } = loadModule("sync/push.ts");
 const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMappings, resolveNotionParentForFile } = loadModule("sync/hierarchy.ts");
 const { syncFolderWithNotion } = loadModule("sync/folderSync.ts");
+const { syncCurrentNote } = loadModule("sync/syncCurrentNote.ts");
+const { NotionClient } = loadModule("notionClient.ts");
 
 function makeFile(filePath, content) {
   const extension = filePath.includes(".") ? filePath.split(".").pop() : "";
@@ -286,6 +288,7 @@ function makeStore() {
   return {
     baselines: {},
     folderMappings: {},
+    managedPageRecords: {},
     quarantineRecords: {},
     getSyncBaseline(pageId) {
       return this.baselines[normalizePageId(pageId)] ?? null;
@@ -304,6 +307,12 @@ function makeStore() {
     },
     getAllFolderMappings() {
       return Object.values(this.folderMappings);
+    },
+    getManagedPageRecord(pageId) {
+      return this.managedPageRecords[normalizePageId(pageId)] ?? null;
+    },
+    async saveManagedPageRecord(record) {
+      this.managedPageRecords[normalizePageId(record.notionPageId)] = record;
     },
     async saveQuarantineRecord(record) {
       this.quarantineRecords[normalizePageId(record.notionPageId)] = record;
@@ -382,6 +391,7 @@ const files = [
   makeFile("Skip.yaml", "skip: true\n"),
   makeFile("Canvas.canvas", "{}"),
   makeFile("LLM Wiki Sync Pull/Pulled.md", "pulled\n"),
+  makeFile("LLM Wiki Sync Review/Skip.md", "skip\n"),
   makeFile("Clean.md", "---\nnotion_page_id: \"clean-page\"\n---\n\nclean\n"),
   makeFile("Local.md", "---\nnotion_page_id: \"local-page\"\n---\n\nnew local\n"),
   makeFile("Remote.md", "---\nnotion_page_id: \"remote-page\"\n---\n\nremote\n"),
@@ -410,6 +420,7 @@ const selected = selectBulkPushMarkdownFiles(app, "");
 assert.equal(selected.some((file) => file.path === "Skip.yaml"), false);
 assert.equal(selected.some((file) => file.path === "Canvas.canvas"), false);
 assert.equal(selected.some((file) => file.path === "LLM Wiki Sync Pull/Pulled.md"), false);
+assert.equal(selected.some((file) => file.path === "LLM Wiki Sync Review/Skip.md"), false);
 const currentFolderSelected = selectBulkPushMarkdownFiles(app, "20_Knowledge");
 assert.deepEqual(currentFolderSelected.map((file) => file.path), [
   "20_Knowledge/Medicine/Heart.md",
@@ -504,11 +515,13 @@ addPage("test-folder", "test", "", ROOT_PAGE_ID);
 addPage("correct-korean-folder", "시험의 시험", "", "test-folder");
 addPage("wrong-korean-folder", "시험의 시험", "", ROOT_PAGE_ID);
 addPage("wrong-title-folder", "틀린 제목", "", "test-folder");
-addPage("misplaced-note", "시험", "linked body\n", ROOT_PAGE_ID);
+addPage("misplaced-note", "시험", "\nlinked body\n", ROOT_PAGE_ID);
+addPage("divergent-page", "Divergent", "BBBB\n", "correct-korean-folder");
 addPage("ambiguous-a", "Ambiguous", "a\n", "correct-korean-folder");
 addPage("ambiguous-b", "Ambiguous", "b\n", "correct-korean-folder");
 const hierarchyFiles = [
   makeFile("test/시험의 시험/시험.md", "---\nnotion_page_id: \"misplaced-note\"\n---\n\nlinked body\n"),
+  makeFile("test/시험의 시험/Divergent.md", "---\nnotion_page_id: \"divergent-page\"\n---\n\nAAAA\n"),
   makeFile("test/시험의 시험의 시험/반갑습니다.md", "hello\n"),
   makeFile("test/시험의 시험/Ambiguous.md", "ambiguous local\n")
 ];
@@ -593,7 +606,19 @@ const init = await initializeWorkspaceMappings({
 assert.ok(init);
 assert.equal(init.baselinesInitialized, 1);
 assert.equal(init.ambiguous, 1);
+assert.equal(init.uninitializedDivergence, 1);
 assert.ok(hierarchyStore.baselines[normalizePageId("misplaced-note")]);
+assert.equal(hierarchyStore.baselines[normalizePageId("divergent-page")], undefined);
+const divergentPush = await pushFileToNotion({
+  app: hierarchyApp,
+  file: hierarchyFiles[1],
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: "correct-korean-folder",
+  expectedParentPageId: "correct-korean-folder",
+  baselineStore: hierarchyStore
+});
+assert.equal(divergentPush.status, "failed");
+assert.equal(markdownPatches.some((patch) => patch.pageId === "divergent-page"), false);
 
 pages.clear();
 notices.length = 0;
@@ -605,6 +630,8 @@ nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 addPage("linked-root-page", "시험", "linked body\n", ROOT_PAGE_ID);
 addPage("old-synced-page", "Old synced", "old\n", ROOT_PAGE_ID);
+addPage("scoped-missing-page", "Scoped missing", "missing\n", ROOT_PAGE_ID);
+addPage("outside-managed-page", "Outside managed", "outside\n", ROOT_PAGE_ID);
 addPage("unknown-remote-page", "Unknown remote", "unknown\n", ROOT_PAGE_ID);
 addPage("duplicate-linked-page", "Duplicate linked", "dup\n", ROOT_PAGE_ID);
 for (let index = 0; index < 105; index += 1) {
@@ -622,7 +649,23 @@ const folderSyncApp = createApp(folderSyncFiles, null);
 const folderSyncStore = makeStore();
 folderSyncStore.baselines[normalizePageId("linked-root-page")] = makeBaseline("linked-root-page", "시험", "\nlinked body\n", "시험", "linked body\n");
 folderSyncStore.baselines[normalizePageId("old-synced-page")] = makeBaseline("old-synced-page", "Old synced", "\nold\n", "Old synced", "old\n");
+folderSyncStore.baselines[normalizePageId("scoped-missing-page")] = makeBaseline("scoped-missing-page", "Scoped missing", "\nmissing\n", "Scoped missing", "missing\n");
+folderSyncStore.baselines[normalizePageId("outside-managed-page")] = makeBaseline("outside-managed-page", "Outside managed", "\noutside\n", "Outside managed", "outside\n");
 folderSyncStore.baselines[normalizePageId("duplicate-linked-page")] = makeBaseline("duplicate-linked-page", "Duplicate linked", "\ndup\n", "Duplicate linked", "dup\n");
+folderSyncStore.managedPageRecords[normalizePageId("scoped-missing-page")] = {
+  notionPageId: "scoped-missing-page",
+  rootPageId: normalizePageId(ROOT_PAGE_ID),
+  lastKnownObsidianPath: "test/Missing.md",
+  lastKnownParentPageId: ROOT_PAGE_ID,
+  updatedAt: "2026-08-22T00:00:00.000Z"
+};
+folderSyncStore.managedPageRecords[normalizePageId("outside-managed-page")] = {
+  notionPageId: "outside-managed-page",
+  rootPageId: normalizePageId(ROOT_PAGE_ID),
+  lastKnownObsidianPath: "other/Outside.md",
+  lastKnownParentPageId: ROOT_PAGE_ID,
+  updatedAt: "2026-08-22T00:00:00.000Z"
+};
 const folderSyncSummary = await syncFolderWithNotion({
   app: folderSyncApp,
   token: "secret_test",
@@ -641,14 +684,20 @@ assert.ok(createRequests.some((request) => request.title === "제발 되라" && 
 assert.ok(createRequests.some((request) => request.title === "반갑습니다" && request.parentPageId === folderSyncStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험의 시험")].notionPageId));
 assert.equal(markdownPatches.some((patch) => patch.pageId === "duplicate-linked-page"), false);
 assert.equal(pages.get("unknown-remote-page").parentPageId, ROOT_PAGE_ID);
+assert.equal(pages.get("old-synced-page").parentPageId, ROOT_PAGE_ID);
+assert.equal(pages.get("outside-managed-page").parentPageId, ROOT_PAGE_ID);
 assert.ok(folderSyncSummary.remoteNew >= 106);
 const reviewPage = Array.from(pages.values()).find((page) => page.title === "LLM Wiki Sync Review" && page.parentPageId === ROOT_PAGE_ID);
 assert.ok(reviewPage);
 const obsidianMissingPage = Array.from(pages.values()).find((page) => page.title === "Obsidian missing" && page.parentPageId === reviewPage.id);
 assert.ok(obsidianMissingPage);
-assert.equal(pages.get("old-synced-page").parentPageId, obsidianMissingPage.id);
-assert.ok(folderSyncStore.quarantineRecords[normalizePageId("old-synced-page")]);
-assert.equal(folderSyncStore.quarantineRecords[normalizePageId("old-synced-page")].previousParentPageId, ROOT_PAGE_ID);
+assert.equal(pages.get("scoped-missing-page").parentPageId, obsidianMissingPage.id);
+assert.ok(folderSyncStore.quarantineRecords[normalizePageId("scoped-missing-page")]);
+assert.equal(folderSyncStore.quarantineRecords[normalizePageId("scoped-missing-page")].previousParentPageId, ROOT_PAGE_ID);
+assert.equal(folderSyncStore.quarantineRecords[normalizePageId("scoped-missing-page")].lastKnownObsidianPath, "test/Missing.md");
+assert.equal(folderSyncStore.quarantineRecords[normalizePageId("scoped-missing-page")].previousNotionPath, "Scoped missing");
+assert.equal(folderSyncStore.quarantineRecords[normalizePageId("old-synced-page")], undefined);
+assert.equal(folderSyncSummary.legacyUnscoped >= 2, true);
 assert.equal(forbiddenRequests.length, 0);
 
 pages.clear();
@@ -705,4 +754,107 @@ assert.ok(subFolder);
 const nestedSingleCreate = createRequests.find((request) => request.title === "Single");
 assert.equal(nestedSingleCreate.parentPageId, nestedSingleStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
 
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+const syncCurrentNestedFile = makeFile("Area/Sub/Current.md", "current nested\n");
+const syncCurrentNestedApp = createApp([syncCurrentNestedFile], "Area/Sub/Current.md");
+const syncCurrentNestedStore = makeStore();
+await syncCurrentNote({
+  app: syncCurrentNestedApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: syncCurrentNestedStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: syncCurrentNestedApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: syncCurrentNestedStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+const syncCurrentCreate = createRequests.find((request) => request.title === "Current");
+assert.ok(syncCurrentCreate);
+assert.equal(syncCurrentCreate.parentPageId, syncCurrentNestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("adopt-existing-page", "Adopt", "same\n", ROOT_PAGE_ID);
+const adoptFile = makeFile("Adopt.md", "same\n");
+const adoptApp = createApp([adoptFile], "Adopt.md");
+const adoptStore = makeStore();
+await pushCurrentNoteToNotion({
+  app: adoptApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: adoptStore
+});
+assert.equal(createRequests.some((request) => request.title === "Adopt"), false);
+assert.equal(adoptFile.content.includes("notion_page_id: \"adopt-existing-page\""), true);
+assert.ok(adoptStore.baselines[normalizePageId("adopt-existing-page")]);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("different-existing-page", "Ambiguous", "remote\n", ROOT_PAGE_ID);
+const differentFile = makeFile("Ambiguous.md", "local\n");
+const differentApp = createApp([differentFile], "Ambiguous.md");
+const differentResult = await pushFileToNotion({
+  app: differentApp,
+  file: differentFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: ROOT_PAGE_ID,
+  expectedParentPageId: ROOT_PAGE_ID,
+  baselineStore: makeStore()
+});
+assert.equal(differentResult.status, "ambiguous");
+assert.equal(createRequests.length, 0);
+assert.equal(markdownPatches.length, 0);
+assert.equal(differentFile.content.includes("notion_page_id"), false);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("duplicate-existing-a", "Duplicate title", "same\n", ROOT_PAGE_ID);
+addPage("duplicate-existing-b", "Duplicate title", "same\n", ROOT_PAGE_ID);
+const duplicateTitleFile = makeFile("Duplicate title.md", "same\n");
+const duplicateTitleApp = createApp([duplicateTitleFile], "Duplicate title.md");
+const duplicateTitleResult = await pushFileToNotion({
+  app: duplicateTitleApp,
+  file: duplicateTitleFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: ROOT_PAGE_ID,
+  expectedParentPageId: ROOT_PAGE_ID,
+  baselineStore: makeStore()
+});
+assert.equal(duplicateTitleResult.status, "ambiguous");
+assert.equal(createRequests.length, 0);
+assert.equal(markdownPatches.length, 0);
+assert.equal(duplicateTitleFile.content.includes("notion_page_id"), false);
+
+assert.equal(forbiddenRequests.length, 0);
 console.log("bulk push checks passed");

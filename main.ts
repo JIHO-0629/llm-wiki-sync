@@ -5,7 +5,8 @@
   Notice,
   Plugin,
   PluginSettingTab,
-  Setting
+  Setting,
+  type TFile
 } from "obsidian";
 import { extractNotionPageId, NotionApiError, NotionClient } from "./notionClient";
 import { pushCurrentFolderToNotion, pushEntireVaultToNotion, type FolderMapping } from "./sync/bulkPush";
@@ -27,6 +28,7 @@ import {
   getSelectableFolderPaths,
   syncFolderWithNotion,
   type FolderSyncStore,
+  type ManagedPageRecord,
   type QuarantineRecord
 } from "./sync/folderSync";
 import {
@@ -44,6 +46,7 @@ interface LlmWikiSyncSettings {
   syncStateVersion: 1;
   syncStates: Record<string, SyncBaseline>;
   folderMappings: Record<string, FolderMapping>;
+  managedPageRecords: Record<string, ManagedPageRecord>;
   quarantineRecords: Record<string, QuarantineRecord>;
   [key: string]: unknown;
 }
@@ -55,6 +58,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
   syncStateVersion: SYNC_STATE_VERSION,
   syncStates: {},
   folderMappings: {},
+  managedPageRecords: {},
   quarantineRecords: {}
 };
 
@@ -96,7 +100,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
           app: this.app,
           token: this.getNotionToken(),
           rootPageUrl: this.settings.notionRootPageUrl,
-          baselineStore: this
+          baselineStore: this,
+          resolveParentPageId: this.resolveParentPageIdForFile
         });
       }
     });
@@ -212,7 +217,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
         app: this.app,
         token: this.getNotionToken(),
         rootPageUrl: this.settings.notionRootPageUrl,
-        baselineStore: this
+        baselineStore: this,
+        resolveParentPageId: this.resolveParentPageIdForFile
       });
     });
 
@@ -308,6 +314,28 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       ));
   }
 
+  getManagedPageRecord(pageId: string): ManagedPageRecord | null {
+    this.ensureSyncStateContainer();
+    const record = this.settings.managedPageRecords[normalizeNotionPageId(pageId)];
+    if (
+      !record ||
+      typeof record !== "object" ||
+      typeof record.notionPageId !== "string" ||
+      typeof record.rootPageId !== "string" ||
+      typeof record.lastKnownObsidianPath !== "string" ||
+      typeof record.updatedAt !== "string"
+    ) {
+      return null;
+    }
+    return record;
+  }
+
+  async saveManagedPageRecord(record: ManagedPageRecord): Promise<void> {
+    this.ensureSyncStateContainer();
+    this.settings.managedPageRecords[normalizeNotionPageId(record.notionPageId)] = record;
+    await this.saveSettings();
+  }
+
   async saveQuarantineRecord(record: QuarantineRecord): Promise<void> {
     this.ensureSyncStateContainer();
     this.settings.quarantineRecords[normalizeNotionPageId(record.notionPageId)] = record;
@@ -324,6 +352,9 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     if (!this.settings.folderMappings || typeof this.settings.folderMappings !== "object") {
       this.settings.folderMappings = {};
     }
+    if (!this.settings.managedPageRecords || typeof this.settings.managedPageRecords !== "object") {
+      this.settings.managedPageRecords = {};
+    }
     if (!this.settings.quarantineRecords || typeof this.settings.quarantineRecords !== "object") {
       this.settings.quarantineRecords = {};
     }
@@ -337,7 +368,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
         app: this.app,
         token: this.getNotionToken(),
         rootPageUrl: this.settings.notionRootPageUrl,
-        baselineStore: this
+        baselineStore: this,
+        resolveParentPageId: this.resolveParentPageIdForFile
       });
     });
     item.appendText(" · ");
@@ -435,18 +467,20 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
       baselineStore: this,
-      resolveParentPageId: async (file) => {
-        const parent = await resolveNotionParentForFile({
-          app: this.app,
-          token: this.getNotionToken(),
-          rootPageUrl: this.settings.notionRootPageUrl,
-          store: this,
-          file
-        });
-        return parent?.parentPageId ?? null;
-      }
+      resolveParentPageId: this.resolveParentPageIdForFile
     });
   }
+
+  resolveParentPageIdForFile = async (file: TFile): Promise<string | null> => {
+    const parent = await resolveNotionParentForFile({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  };
 
   async pullPagesFromNotion(): Promise<void> {
     await pullPagesFromNotion({
@@ -534,7 +568,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     if (!summary) {
       return;
     }
-    new Notice(`LLM Wiki Sync: Mapping initialization complete - baselines initialized ${summary.baselinesInitialized}, already initialized ${summary.alreadyInitialized}, unmapped ${summary.unmapped}, ambiguous ${summary.ambiguous}, failed ${summary.failed}.`);
+    new Notice(`LLM Wiki Sync: Mapping initialization complete - baselines initialized ${summary.baselinesInitialized}, already initialized ${summary.alreadyInitialized}, uninitialized divergence ${summary.uninitializedDivergence}, unmapped ${summary.unmapped}, ambiguous ${summary.ambiguous}, failed ${summary.failed}.`);
   }
 }
 
@@ -732,7 +766,8 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
               app: this.app,
               token: this.plugin.getNotionToken(),
               rootPageUrl: this.plugin.settings.notionRootPageUrl,
-              baselineStore: this.plugin
+              baselineStore: this.plugin,
+              resolveParentPageId: this.plugin.resolveParentPageIdForFile
             });
           });
       });

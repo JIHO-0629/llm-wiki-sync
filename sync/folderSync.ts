@@ -27,12 +27,23 @@ export interface QuarantineRecord {
   previousParentPageId: string;
   previousTitle: string;
   lastKnownObsidianPath?: string;
+  previousNotionPath?: string;
   quarantinedAt: string;
+}
+
+export interface ManagedPageRecord {
+  notionPageId: string;
+  rootPageId: string;
+  lastKnownObsidianPath: string;
+  lastKnownParentPageId?: string;
+  updatedAt: string;
 }
 
 export interface FolderSyncStore extends BulkPushStore {
   getAllSyncBaselinePageIds(): string[];
   getAllFolderMappings(): FolderMapping[];
+  getManagedPageRecord(pageId: string): ManagedPageRecord | null;
+  saveManagedPageRecord(record: ManagedPageRecord): Promise<void>;
   saveQuarantineRecord(record: QuarantineRecord): Promise<void>;
 }
 
@@ -47,6 +58,8 @@ export interface FolderSyncSummary {
   conflicts: number;
   ambiguous: number;
   remoteNew: number;
+  legacyUnscoped: number;
+  uninitializedDivergence: number;
   orphanCandidates: number;
   movedToReview: number;
   failed: number;
@@ -122,6 +135,10 @@ export async function syncFolderWithNotion(options: {
     summary.ambiguous += init.ambiguous;
     summary.details.push(`AMBIGUOUS ${init.ambiguous} mapping initialization candidates skipped`);
   }
+  if (init?.uninitializedDivergence) {
+    summary.uninitializedDivergence += init.uninitializedDivergence;
+    summary.details.push(`UNINITIALIZED_DIVERGENCE ${init.uninitializedDivergence} mapped notes skipped`);
+  }
 
   for (const file of files) {
     const parent = await resolveNotionParentForFile({
@@ -148,6 +165,15 @@ export async function syncFolderWithNotion(options: {
       baselineStore: options.store
     });
     applyPushResult(summary, result);
+    if (isSuccessfulSyncResult(result) && result.pageId) {
+      await options.store.saveManagedPageRecord({
+        notionPageId: result.pageId,
+        rootPageId: normalizeNotionPageId(rootPageId),
+        lastKnownObsidianPath: normalizePath(file.path),
+        lastKnownParentPageId: parent.parentPageId,
+        updatedAt: new Date().toISOString()
+      });
+    }
   }
 
   const secondSnapshot = await scanRemoteTree(client, rootPageId);
@@ -156,6 +182,7 @@ export async function syncFolderWithNotion(options: {
     client,
     store: options.store,
     rootPageId,
+    scopePath,
     localFiles: files,
     firstSnapshot,
     secondSnapshot,
@@ -198,17 +225,18 @@ async function quarantineVerifiedOrphans(options: {
   client: NotionClient;
   store: FolderSyncStore;
   rootPageId: string;
+  scopePath: string;
   localFiles: TFile[];
   firstSnapshot: RemoteTreePage[];
   secondSnapshot: RemoteTreePage[];
   summary: FolderSyncSummary;
 }): Promise<void> {
-  const localPageIds = new Set<string>();
+  const selectedLocalPageIds = new Set<string>();
   const folderPageIds = new Set(options.store.getAllFolderMappings().map((mapping) => normalizeNotionPageId(mapping.notionPageId)));
   for (const file of options.localFiles) {
     const mapping = await getNotionPageMapping(options.app, file);
     if (mapping.pageId) {
-      localPageIds.add(normalizeNotionPageId(mapping.pageId));
+      selectedLocalPageIds.add(normalizeNotionPageId(mapping.pageId));
     }
   }
 
@@ -221,10 +249,22 @@ async function quarantineVerifiedOrphans(options: {
     if (isReviewPath(page.path)) {
       continue;
     }
-    if (!baselineIds.has(normalizedPageId) || localPageIds.has(normalizedPageId) || !firstIds.has(normalizedPageId)) {
+    if (!baselineIds.has(normalizedPageId) || selectedLocalPageIds.has(normalizedPageId) || !firstIds.has(normalizedPageId)) {
       if (!baselineIds.has(normalizedPageId) && !folderPageIds.has(normalizedPageId) && !isReviewPath(page.path)) {
         options.summary.remoteNew += 1;
       }
+      continue;
+    }
+
+    const managedRecord = options.store.getManagedPageRecord(page.id);
+    if (
+      !managedRecord ||
+      normalizeNotionPageId(managedRecord.rootPageId) !== normalizeNotionPageId(options.rootPageId) ||
+      !isPathInScope(managedRecord.lastKnownObsidianPath, options.scopePath)
+    ) {
+      options.summary.legacyUnscoped += 1;
+      options.summary.ambiguous += 1;
+      options.summary.details.push(`LEGACY_UNSCOPED ${page.path} - no selected-folder Obsidian path evidence; Review move skipped`);
       continue;
     }
 
@@ -245,7 +285,8 @@ async function quarantineVerifiedOrphans(options: {
         reason: "MISSING_IN_OBSIDIAN",
         previousParentPageId: page.parentPageId,
         previousTitle: page.title,
-        lastKnownObsidianPath: page.path,
+        lastKnownObsidianPath: managedRecord.lastKnownObsidianPath,
+        previousNotionPath: page.path,
         quarantinedAt: new Date().toISOString()
       });
       options.summary.movedToReview += 1;
@@ -328,9 +369,13 @@ function applyPushResult(summary: FolderSyncSummary, result: PushFileResult): vo
   else if (result.status === "clean") summary.alreadyInSync += 1;
   else if (result.status === "remote_changed") summary.remoteChanged += 1;
   else if (result.status === "conflict") summary.conflicts += 1;
-  else if (result.status === "misplaced") summary.ambiguous += 1;
+  else if (result.status === "misplaced" || result.status === "ambiguous") summary.ambiguous += 1;
   else summary.failed += 1;
   summary.details.push(`${result.status.toUpperCase()} ${result.filePath} - ${result.message}`);
+}
+
+function isSuccessfulSyncResult(result: PushFileResult): boolean {
+  return result.status === "created" || result.status === "updated" || result.status === "clean";
 }
 
 function createSummary(scopePath: string): FolderSyncSummary {
@@ -345,6 +390,8 @@ function createSummary(scopePath: string): FolderSyncSummary {
     conflicts: 0,
     ambiguous: 0,
     remoteNew: 0,
+    legacyUnscoped: 0,
+    uninitializedDivergence: 0,
     orphanCandidates: 0,
     movedToReview: 0,
     failed: 0,
@@ -368,6 +415,8 @@ function formatFolderSyncSummary(summary: FolderSyncSummary): string {
     `Conflicts:            ${summary.conflicts}`,
     `Ambiguous:            ${summary.ambiguous}`,
     `Remote new:           ${summary.remoteNew}`,
+    `Legacy unscoped:      ${summary.legacyUnscoped}`,
+    `Uninitialized divergence: ${summary.uninitializedDivergence}`,
     `Orphan candidates:    ${summary.orphanCandidates}`,
     `Moved to Review:      ${summary.movedToReview}`,
     `Failed:               ${summary.failed}`,
@@ -378,6 +427,15 @@ function formatFolderSyncSummary(summary: FolderSyncSummary): string {
 
 function isReviewPath(path: string): boolean {
   return path === REVIEW_FOLDER_TITLE || path.startsWith(`${REVIEW_FOLDER_TITLE}/`);
+}
+
+function isPathInScope(path: string, scopePath: string): boolean {
+  const normalizedPath = normalizePath(path);
+  const normalizedScope = normalizeVaultFolderPath(scopePath);
+  if (!normalizedScope) {
+    return !isSystemObsidianPath(normalizedPath);
+  }
+  return normalizedPath === normalizedScope || normalizedPath.startsWith(`${normalizedScope}/`);
 }
 
 function isSystemObsidianPath(path: string): boolean {

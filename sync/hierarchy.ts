@@ -58,6 +58,7 @@ export interface HierarchyRepairSummary {
 export interface MappingInitializationSummary {
   baselinesInitialized: number;
   alreadyInitialized: number;
+  uninitializedDivergence: number;
   unmapped: number;
   ambiguous: number;
   failed: number;
@@ -166,6 +167,7 @@ export async function initializeWorkspaceMappings(options: {
   const summary: MappingInitializationSummary = {
     baselinesInitialized: 0,
     alreadyInitialized: 0,
+    uninitializedDivergence: 0,
     unmapped: 0,
     ambiguous: 0,
     failed: 0
@@ -203,6 +205,10 @@ export async function initializeWorkspaceMappings(options: {
       }
       const localSnapshot = await getLocalSyncSnapshot(context.app, file);
       const remoteSnapshot = await getRemoteSyncSnapshot(context.client, mapping.pageId);
+      if (localSnapshot.fingerprint !== remoteSnapshot.fingerprint) {
+        summary.uninitializedDivergence += 1;
+        continue;
+      }
       await context.store.saveSyncBaseline(
         mapping.pageId,
         createSyncBaseline(mapping.pageId, localSnapshot, remoteSnapshot)

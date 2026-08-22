@@ -18,6 +18,7 @@ export interface SyncCurrentNoteOptions {
   token: string;
   rootPageUrl: string;
   baselineStore: SyncBaselineStore;
+  resolveParentPageId?: (file: TFile) => Promise<string | null>;
 }
 
 export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<void> {
