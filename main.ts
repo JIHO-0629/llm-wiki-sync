@@ -38,7 +38,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.6.0";
+const VERSION_LABEL = "v0.7.0";
 
 export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore {
   settings: LlmWikiSyncSettings = DEFAULT_SETTINGS;
@@ -47,7 +47,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.log("[LLM Wiki Sync] v0.6.0 loaded");
+    console.debug("[LLM Wiki Sync] v0.7.0 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
@@ -215,8 +215,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
 
   private addStatusBarAction(parent: HTMLElement, label: string, callback: () => void): void {
     const action = parent.createSpan({ text: label });
+    action.addClass("llm-wiki-sync-status-action");
     action.addEventListener("click", callback);
-    action.style.cursor = "pointer";
   }
 
   configureDebugLogging(): void {
@@ -323,13 +323,16 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "LLM Wiki Sync" });
-    containerEl.createEl("p", { text: "Notion ↔ Obsidian synchronization" });
-    containerEl.createEl("p", { text: `Version: ${VERSION_LABEL}` });
+
+    new Setting(containerEl)
+      .setName("Version")
+      .setDesc(VERSION_LABEL);
 
     const savedToken = this.plugin.getNotionToken();
 
-    containerEl.createEl("h3", { text: "Notion connection" });
+    new Setting(containerEl)
+      .setName("Notion connection")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Notion API token")
@@ -381,7 +384,9 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    containerEl.createEl("h3", { text: "Sync" });
+    new Setting(containerEl)
+      .setName("Sync")
+      .setHeading();
     containerEl.createEl("p", { text: "Normal use: 1. Open a note 2. Click Sync current note 3. If a conflict appears, choose which version to keep." });
 
     new Setting(containerEl)
@@ -400,11 +405,13 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
           });
       });
 
-    containerEl.createEl("h3", { text: "Advanced" });
+    new Setting(containerEl)
+      .setName("Advanced")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Troubleshooting tools")
-      .setDesc("Push, Pull, baseline initialization, conflict resolution, and debug commands remain available from the command palette.");
+      .setDesc("Push, pull, baseline initialization, conflict resolution, and debug commands remain available from the command palette.");
 
     new Setting(containerEl)
       .setName("Verbose debug logging")

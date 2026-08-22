@@ -129,8 +129,9 @@ async function pullActiveMappedNote(
   const pageDetails = await client.getPageDetails(pageId);
   const pageMarkdown = await client.retrievePageMarkdown(pageId);
   const nextBody = normalizePulledMarkdown(pageMarkdown.markdown);
-  const existingMarkdown = await app.vault.read(file);
-  await app.vault.modify(file, replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, pageId));
+  await app.vault.process(file, (existingMarkdown) =>
+    replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, pageId)
+  );
   const renameResult = await renameMappedFileAfterPull(app, file, pageId, pageDetails.title, runId);
   if (renameResult !== "renamed" && renameResult !== "noop") {
     throw new Error(`Pull partial failure: rename result ${renameResult}`);

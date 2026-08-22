@@ -112,8 +112,9 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           console.debug(`${pageLog} raw Notion title:`, rawTitle);
           console.debug(`${pageLog} current local path:`, mappedFile.path);
           console.debug(`${pageLog} body update start`);
-          const existingMarkdown = await options.app.vault.read(mappedFile);
-          await options.app.vault.modify(mappedFile, replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, cleanMarkdown, childPage.id));
+          await options.app.vault.process(mappedFile, (existingMarkdown) =>
+            replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, cleanMarkdown, childPage.id)
+          );
           console.debug(`${pageLog} body update result: success`);
           counts.updated += 1;
 
