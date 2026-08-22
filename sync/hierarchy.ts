@@ -16,6 +16,7 @@ import {
   type FolderMapping
 } from "./bulkPush";
 import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
+import type { SyncRunCache } from "./runCache";
 
 export type HierarchyScope = "current-folder" | "entire-vault" | "folder";
 
@@ -93,6 +94,9 @@ export async function repairWorkspaceHierarchy(options: {
   store: BulkPushStore;
   scope: HierarchyScope;
   folderPath?: string;
+  client?: NotionClient;
+  runCache?: SyncRunCache;
+  onFolderProgress?: (folderPath: string) => void;
 }): Promise<HierarchyRepairSummary | null> {
   const context = await createHierarchyContext(options);
   if (!context) {
@@ -110,6 +114,7 @@ export async function repairWorkspaceHierarchy(options: {
   const folderPaths = getFolderPathsFromFiles(context.files);
 
   for (const folderPath of folderPaths) {
+    options.onFolderProgress?.(folderPath);
     const result = await ensureHierarchyFolder(context, folderPath);
     if (result.action === "created") summary.foldersCreated += 1;
     else if (result.action === "repaired") summary.folderMappingsRepaired += 1;
@@ -158,6 +163,8 @@ export async function initializeWorkspaceMappings(options: {
   store: BulkPushStore;
   scope: HierarchyScope;
   folderPath?: string;
+  client?: NotionClient;
+  runCache?: SyncRunCache;
 }): Promise<MappingInitializationSummary | null> {
   const context = await createHierarchyContext(options);
   if (!context) {
@@ -229,13 +236,17 @@ export async function resolveNotionParentForFile(options: {
   rootPageUrl: string;
   store: BulkPushStore;
   file: TFile;
+  client?: NotionClient;
+  runCache?: SyncRunCache;
 }): Promise<HierarchyParentResult | null> {
   const context = await createHierarchyContext({
     app: options.app,
     token: options.token,
     rootPageUrl: options.rootPageUrl,
     store: options.store,
-    scope: "entire-vault"
+    scope: "entire-vault",
+    client: options.client,
+    runCache: options.runCache
   });
   if (!context) {
     return null;
@@ -300,6 +311,7 @@ interface HierarchyContext {
   normalizedRootPageId: string;
   files: TFile[];
   scope: HierarchyScope;
+  runCache?: SyncRunCache;
 }
 
 async function createHierarchyContext(options: {
@@ -309,6 +321,8 @@ async function createHierarchyContext(options: {
   store: BulkPushStore;
   scope: HierarchyScope;
   folderPath?: string;
+  client?: NotionClient;
+  runCache?: SyncRunCache;
 }): Promise<HierarchyContext | null> {
   const token = options.token.trim();
   if (!token) {
@@ -329,7 +343,7 @@ async function createHierarchyContext(options: {
       ? getFolderPath(activeFile.path)
       : "";
   const files = selectBulkPushMarkdownFiles(options.app, rootFolderPath);
-  const client = new NotionClient({ token });
+  const client = options.client ?? new NotionClient({ token });
   try {
     await client.getPageDetails(rootPageId);
   } catch (error) {
@@ -344,7 +358,8 @@ async function createHierarchyContext(options: {
     rootPageId,
     normalizedRootPageId: normalizeNotionPageId(rootPageId),
     files,
-    scope: options.scope
+    scope: options.scope,
+    runCache: options.runCache
   };
 }
 
@@ -454,6 +469,10 @@ async function ensureHierarchyFolder(
   if (!normalizedFolderPath) {
     return { action: "matched", pageId: context.rootPageId };
   }
+  const cachedParent = context.runCache?.resolvedFolderParents.get(normalizedFolderPath);
+  if (cachedParent) {
+    return { action: "matched", pageId: cachedParent };
+  }
 
   const parentPageId = await getExpectedParentForFolder(context, normalizedFolderPath, counters);
   if (!parentPageId) {
@@ -466,9 +485,11 @@ async function ensureHierarchyFolder(
     if (validation.status === "MATCHED") {
       if (context.store.getFolderMapping(mappingKey) === null) {
         await context.store.saveFolderMapping(mappingKey, mapping);
+        context.runCache?.resolvedFolderParents.set(normalizedFolderPath, mapping.notionPageId);
         if (counters) counters.folderMappingsRepaired += 1;
         return { action: "repaired", pageId: mapping.notionPageId };
       }
+      context.runCache?.resolvedFolderParents.set(normalizedFolderPath, mapping.notionPageId);
       return { action: "matched", pageId: mapping.notionPageId };
     }
   }
@@ -483,6 +504,7 @@ async function ensureHierarchyFolder(
       lastKnownPath: normalizedFolderPath,
       rootPageId: context.normalizedRootPageId
     });
+    context.runCache?.resolvedFolderParents.set(normalizedFolderPath, existing[0].id);
     if (counters) counters.folderMappingsRepaired += 1;
     return { action: "repaired", pageId: existing[0].id };
   }
@@ -499,6 +521,7 @@ async function ensureHierarchyFolder(
       lastKnownPath: normalizedFolderPath,
       rootPageId: context.normalizedRootPageId
     });
+    context.runCache?.resolvedFolderParents.set(normalizedFolderPath, created.id);
     if (counters) {
       if (mapping) counters.folderMappingsRepaired += 1;
       else counters.foldersCreated += 1;

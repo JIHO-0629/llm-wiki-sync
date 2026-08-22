@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2
+
+- Added a live progress modal for folder and entire-vault sync with phases, current item, elapsed time, and running counters.
+- Added a global sync execution lock so sync, push, repair, initialize, and audit entry points do not overlap with an active sync run.
+- Added phase timing diagnostics for folder sync when verbose debug logging is enabled.
+- Added run-scoped Notion API caching for page details, child page listings, and resolved folder parents, with invalidation after create, move, title, and body mutations.
+- Reduced repeated folder parent resolution for many notes in the same folder while preserving second-pass Notion verification and v0.8.1 orphan safety checks.
+
 ## 0.8.1
 
 - Added a safe `Sync folder with Notion` workflow that reconciles Obsidian folders and linked Notion page parents before syncing note content.

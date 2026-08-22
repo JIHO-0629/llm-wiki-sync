@@ -23,6 +23,8 @@ const createRequests = [];
 const markdownPatches = [];
 const moveRequests = [];
 const forbiddenRequests = [];
+const childListRequests = new Map();
+const pageDetailRequests = new Map();
 let nextPageId = 1;
 const ROOT_PAGE_ID = "11111111-1111-1111-1111-111111111111";
 const ROOT_B_PAGE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -73,12 +75,14 @@ async function requestUrl(request) {
 
   if (request.method === "GET" && request.url.includes("/v1/pages/")) {
     const pageId = decodeURIComponent(request.url.match(/\/v1\/pages\/([^/?]+)$/)[1]);
+    incrementCount(pageDetailRequests, normalizePageId(pageId));
     const page = getPageOrThrow(pageId);
     return ok(pageDetails(page));
   }
 
   if (request.method === "GET" && request.url.includes("/v1/blocks/") && request.url.includes("/children")) {
     const parentPageId = decodeURIComponent(request.url.match(/\/v1\/blocks\/([^/?]+)\/children/)[1]);
+    incrementCount(childListRequests, normalizePageId(parentPageId));
     getPageOrThrow(parentPageId);
     const url = new URL(request.url);
     const pageSize = Number(url.searchParams.get("page_size") ?? "100");
@@ -222,6 +226,8 @@ const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMa
 const { syncFolderWithNotion } = loadModule("sync/folderSync.ts");
 const { syncCurrentNote } = loadModule("sync/syncCurrentNote.ts");
 const { NotionClient } = loadModule("notionClient.ts");
+const { SyncExecutionLock } = loadModule("sync/runLock.ts");
+const { CachedNotionClient, createSyncRunCache } = loadModule("sync/runCache.ts");
 
 function makeFile(filePath, content) {
   const extension = filePath.includes(".") ? filePath.split(".").pop() : "";
@@ -362,6 +368,10 @@ function normalizeBody(body) {
 
 function normalizePageId(pageId) {
   return pageId.replace(/-/g, "").toLowerCase();
+}
+
+function incrementCount(map, key) {
+  map.set(key, (map.get(key) ?? 0) + 1);
 }
 
 function mappingKey(rootPageId, folderPath) {
@@ -1061,6 +1071,97 @@ assert.equal(duplicateTitleResult.status, "ambiguous");
 assert.equal(createRequests.length, 0);
 assert.equal(markdownPatches.length, 0);
 assert.equal(duplicateTitleFile.content.includes("notion_page_id"), false);
+
+const lock = new SyncExecutionLock();
+const firstLockRun = lock.run("sync-folder", "test", async () => {
+  assert.equal(lock.snapshot.running, true);
+  const blocked = await lock.run("sync-current-note", "Current note", async () => "blocked");
+  assert.equal(blocked.started, false);
+  return "done";
+});
+assert.equal(lock.snapshot.running, true);
+assert.equal((await firstLockRun).started, true);
+assert.equal(lock.snapshot.running, false);
+try {
+  await lock.run("sync-folder", "failure", async () => {
+    throw new Error("expected failure");
+  });
+  assert.fail("lock failure path should throw");
+} catch {
+  assert.equal(lock.snapshot.running, false);
+}
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+childListRequests.clear();
+pageDetailRequests.clear();
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("perf-folder", "Perf", "", ROOT_PAGE_ID);
+const perfFiles = [];
+const perfStore = makeStore();
+perfStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Perf")] = {
+  notionPageId: "perf-folder",
+  lastKnownPath: "Perf",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+for (let index = 0; index < 50; index += 1) {
+  const pageId = `perf-page-${index}`;
+  const title = `Note ${index}`;
+  addPage(pageId, title, "\nbody\n", "perf-folder");
+  perfFiles.push(makeFile(`Perf/${title}.md`, `---\nnotion_page_id: \"${pageId}\"\n---\n\nbody\n`));
+  perfStore.baselines[normalizePageId(pageId)] = makeBaseline(pageId, title, "\nbody\n", title, "\nbody\n");
+}
+const perfProgress = [];
+const perfSummary = await syncFolderWithNotion({
+  app: createApp(perfFiles, null),
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: perfStore,
+  folderPath: "Perf",
+  showResultModal: false,
+  verboseDebugLogging: true,
+  onProgress: (progress) => perfProgress.push(progress)
+});
+assert.ok(perfSummary);
+assert.equal(perfSummary.processed, 50);
+assert.equal(perfProgress.some((progress) => progress.phase === "local_scan"), true);
+assert.equal(perfProgress.some((progress) => progress.phase === "remote_scan"), true);
+assert.equal(perfProgress.some((progress) => progress.phase === "hierarchy_repair"), true);
+assert.equal(perfProgress.some((progress) => progress.phase === "note_sync"), true);
+assert.equal(perfProgress.some((progress) => progress.phase === "verification"), true);
+assert.equal(perfProgress.some((progress) => progress.phase === "review_check"), true);
+assert.equal(perfProgress.at(-1).phase, "complete");
+assert.equal(perfProgress.some((progress) => progress.currentPath === "Perf/Note 0.md"), true);
+assert.equal(perfProgress.some((progress) => progress.processed === 50), true);
+assert.equal(childListRequests.get(normalizePageId("perf-folder")) ?? 0, 1);
+assert.equal(forbiddenRequests.length, 0);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+childListRequests.clear();
+pageDetailRequests.clear();
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("cache-move-a", "Move A", "", ROOT_PAGE_ID);
+addPage("cache-move-b", "Move B", "", ROOT_PAGE_ID);
+addPage("cache-page", "Cache page", "cache\n", "cache-move-a");
+const cache = createSyncRunCache();
+const cachedClient = new CachedNotionClient({ token: "secret_test", cache });
+assert.equal((await cachedClient.listChildPages(ROOT_PAGE_ID)).some((page) => page.title === "Created cache child"), false);
+await cachedClient.createChildPage({ parentPageId: ROOT_PAGE_ID, title: "Created cache child", markdown: "", pushedAt: new Date() });
+assert.equal((await cachedClient.listChildPages(ROOT_PAGE_ID)).some((page) => page.title === "Created cache child"), true);
+assert.equal((await cachedClient.getPageDetails("cache-page")).parentPageId, "cache-move-a");
+await cachedClient.movePageToPage("cache-page", "cache-move-b");
+assert.equal((await cachedClient.getPageDetails("cache-page")).parentPageId, "cache-move-b");
 
 assert.equal(forbiddenRequests.length, 0);
 console.log("bulk push checks passed");

@@ -15,6 +15,7 @@ import {
 } from "./hierarchy";
 import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
 import { pushFileToNotion, type PushFileResult } from "./push";
+import { CachedNotionClient, createSyncRunCache } from "./runCache";
 
 export const REVIEW_FOLDER_TITLE = "LLM Wiki Sync Review";
 export const REVIEW_OBSIDIAN_MISSING_TITLE = "Obsidian missing";
@@ -63,7 +64,37 @@ export interface FolderSyncSummary {
   orphanCandidates: number;
   movedToReview: number;
   failed: number;
+  processed: number;
+  total: number;
+  durationMs: number;
+  cancelled: boolean;
   details: string[];
+}
+
+export type SyncProgressPhase =
+  | "local_scan"
+  | "remote_scan"
+  | "hierarchy_repair"
+  | "note_sync"
+  | "verification"
+  | "review_check"
+  | "complete"
+  | "cancelled";
+
+export interface SyncProgress {
+  phase: SyncProgressPhase;
+  phaseIndex: number;
+  phaseTotal: number;
+  processed?: number;
+  total?: number;
+  currentPath?: string;
+  summary?: Partial<FolderSyncSummary>;
+  message?: string;
+  elapsedMs?: number;
+}
+
+export interface SyncCancelToken {
+  cancelRequested: boolean;
 }
 
 interface RemoteTreePage {
@@ -81,8 +112,39 @@ export async function syncFolderWithNotion(options: {
   rootPageUrl: string;
   store: FolderSyncStore;
   folderPath: string;
+  onProgress?: (progress: SyncProgress) => void;
+  cancelToken?: SyncCancelToken;
+  showResultModal?: boolean;
+  verboseDebugLogging?: boolean;
 }): Promise<FolderSyncSummary | null> {
+  const startedAt = Date.now();
+  const timings = new Map<string, number>();
+  const emitProgress = (progress: Omit<SyncProgress, "elapsedMs" | "summary"> & { summary?: Partial<FolderSyncSummary> }) => {
+    options.onProgress?.({
+      ...progress,
+      summary: progress.summary ?? summary,
+      elapsedMs: Date.now() - startedAt
+    });
+  };
+  const markTiming = (label: string, phaseStartedAt: number) => {
+    timings.set(label, Date.now() - phaseStartedAt);
+  };
   const token = options.token.trim();
+  const scopePath = normalizeVaultFolderPath(options.folderPath);
+  const summary = createSummary(scopePath);
+  const finish = (phase: "complete" | "cancelled") => {
+    summary.durationMs = Date.now() - startedAt;
+    emitProgress({
+      phase,
+      phaseIndex: 6,
+      phaseTotal: 6,
+      processed: summary.processed,
+      total: summary.total,
+      message: phase === "cancelled" ? "Sync cancelled" : "Sync complete"
+    });
+    logPerfTimings(timings, summary.durationMs, options.verboseDebugLogging === true);
+  };
+
   if (!token) {
     new Notice("LLM Wiki Sync: Notion API token is missing");
     return null;
@@ -93,10 +155,18 @@ export async function syncFolderWithNotion(options: {
     return null;
   }
 
-  const scopePath = normalizeVaultFolderPath(options.folderPath);
+  let phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "local_scan",
+    phaseIndex: 1,
+    phaseTotal: 6,
+    message: "Scanning Obsidian"
+  });
   const files = selectBulkPushMarkdownFiles(options.app, scopePath);
-  const client = new NotionClient({ token });
-  const summary = createSummary(scopePath);
+  summary.total = files.length;
+  markTiming("local scan", phaseStartedAt);
+  const runCache = createSyncRunCache();
+  const client = new CachedNotionClient({ token, cache: runCache });
   const protectedFromQuarantinePageIds = new Set<string>();
 
   try {
@@ -106,14 +176,43 @@ export async function syncFolderWithNotion(options: {
     return null;
   }
 
+  phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "remote_scan",
+    phaseIndex: 2,
+    phaseTotal: 6,
+    total: files.length,
+    message: "Scanning Notion"
+  });
   const firstSnapshot = await scanRemoteTree(client, rootPageId);
+  markTiming("first remote scan", phaseStartedAt);
+  if (shouldCancel(options.cancelToken, summary, finish)) return summary;
+
+  phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "hierarchy_repair",
+    phaseIndex: 3,
+    phaseTotal: 6,
+    total: files.length,
+    message: "Repairing folder hierarchy"
+  });
   const repair = await repairWorkspaceHierarchy({
     app: options.app,
     token,
     rootPageUrl: options.rootPageUrl,
     store: options.store,
     scope: "folder",
-    folderPath: scopePath
+    folderPath: scopePath,
+    client,
+    runCache,
+    onFolderProgress: (folderPath) => emitProgress({
+      phase: "hierarchy_repair",
+      phaseIndex: 3,
+      phaseTotal: 6,
+      total: files.length,
+      currentPath: folderPath,
+      message: "Checking folder"
+    })
   });
   if (repair) {
     summary.foldersCreated += repair.foldersCreated;
@@ -123,14 +222,19 @@ export async function syncFolderWithNotion(options: {
       summary.details.push(`MAPPING_REPAIRED folder mappings repaired ${repair.folderMappingsRepaired}`);
     }
   }
+  markTiming("hierarchy repair", phaseStartedAt);
+  if (shouldCancel(options.cancelToken, summary, finish)) return summary;
 
+  phaseStartedAt = Date.now();
   const init = await initializeWorkspaceMappings({
     app: options.app,
     token,
     rootPageUrl: options.rootPageUrl,
     store: options.store,
     scope: "folder",
-    folderPath: scopePath
+    folderPath: scopePath,
+    client,
+    runCache
   });
   if (init?.ambiguous) {
     summary.ambiguous += init.ambiguous;
@@ -140,18 +244,50 @@ export async function syncFolderWithNotion(options: {
     summary.uninitializedDivergence += init.uninitializedDivergence;
     summary.details.push(`UNINITIALIZED_DIVERGENCE ${init.uninitializedDivergence} mapped notes skipped`);
   }
+  markTiming("mapping initialize", phaseStartedAt);
+  if (shouldCancel(options.cancelToken, summary, finish)) return summary;
 
+  phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "note_sync",
+    phaseIndex: 4,
+    phaseTotal: 6,
+    processed: 0,
+    total: files.length,
+    message: "Syncing notes"
+  });
   for (const file of files) {
+    if (shouldCancel(options.cancelToken, summary, finish)) return summary;
+    emitProgress({
+      phase: "note_sync",
+      phaseIndex: 4,
+      phaseTotal: 6,
+      processed: summary.processed,
+      total: files.length,
+      currentPath: file.path,
+      message: "Syncing note"
+    });
     const parent = await resolveNotionParentForFile({
       app: options.app,
       token,
       rootPageUrl: options.rootPageUrl,
       store: options.store,
-      file
+      file,
+      client,
+      runCache
     });
     if (!parent) {
       summary.failed += 1;
+      summary.processed += 1;
       summary.details.push(`FAILED ${file.path} - could not resolve Notion folder parent`);
+      emitProgress({
+        phase: "note_sync",
+        phaseIndex: 4,
+        phaseTotal: 6,
+        processed: summary.processed,
+        total: files.length,
+        currentPath: file.path
+      });
       continue;
     }
     summary.foldersCreated += parent.foldersCreated;
@@ -166,6 +302,7 @@ export async function syncFolderWithNotion(options: {
       baselineStore: options.store
     });
     applyPushResult(summary, result);
+    summary.processed += 1;
     if (result.status === "ambiguous" && result.pageId) {
       protectedFromQuarantinePageIds.add(normalizeNotionPageId(result.pageId));
     }
@@ -178,9 +315,40 @@ export async function syncFolderWithNotion(options: {
         updatedAt: new Date().toISOString()
       });
     }
+    emitProgress({
+      phase: "note_sync",
+      phaseIndex: 4,
+      phaseTotal: 6,
+      processed: summary.processed,
+      total: files.length,
+      currentPath: file.path
+    });
   }
+  markTiming("note sync", phaseStartedAt);
+  if (shouldCancel(options.cancelToken, summary, finish)) return summary;
 
+  phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "verification",
+    phaseIndex: 5,
+    phaseTotal: 6,
+    processed: summary.processed,
+    total: files.length,
+    message: "Verifying Notion hierarchy"
+  });
   const secondSnapshot = await scanRemoteTree(client, rootPageId);
+  markTiming("second remote scan", phaseStartedAt);
+  if (shouldCancel(options.cancelToken, summary, finish)) return summary;
+
+  phaseStartedAt = Date.now();
+  emitProgress({
+    phase: "review_check",
+    phaseIndex: 6,
+    phaseTotal: 6,
+    processed: summary.processed,
+    total: files.length,
+    message: "Checking Review candidates"
+  });
   await quarantineVerifiedOrphans({
     app: options.app,
     client,
@@ -193,8 +361,12 @@ export async function syncFolderWithNotion(options: {
     secondSnapshot,
     summary
   });
+  markTiming("orphan verification", phaseStartedAt);
 
-  new FolderSyncResultModal(options.app, summary).open();
+  finish("complete");
+  if (options.showResultModal !== false) {
+    new FolderSyncResultModal(options.app, summary).open();
+  }
   new Notice("LLM Wiki Sync: Folder sync complete");
   return summary;
 }
@@ -413,6 +585,10 @@ function createSummary(scopePath: string): FolderSyncSummary {
     orphanCandidates: 0,
     movedToReview: 0,
     failed: 0,
+    processed: 0,
+    total: 0,
+    durationMs: 0,
+    cancelled: false,
     details: []
   };
 }
@@ -438,9 +614,42 @@ function formatFolderSyncSummary(summary: FolderSyncSummary): string {
     `Orphan candidates:    ${summary.orphanCandidates}`,
     `Moved to Review:      ${summary.movedToReview}`,
     `Failed:               ${summary.failed}`,
+    `Duration:             ${formatDuration(summary.durationMs)}`,
+    summary.cancelled ? "Cancelled:            yes" : "",
     "",
     ...summary.details
   ].join("\n");
+}
+
+function shouldCancel(cancelToken: SyncCancelToken | undefined, summary: FolderSyncSummary, finish: (phase: "complete" | "cancelled") => void): boolean {
+  if (!cancelToken?.cancelRequested) {
+    return false;
+  }
+  summary.cancelled = true;
+  finish("cancelled");
+  new Notice("LLM Wiki Sync: Sync cancelled");
+  return true;
+}
+
+function logPerfTimings(timings: Map<string, number>, totalMs: number, enabled: boolean): void {
+  if (!enabled) {
+    return;
+  }
+  for (const [label, durationMs] of timings) {
+    console.debug(`[LLM Wiki Sync][Perf] ${label}: ${durationMs}ms`);
+  }
+  console.debug(`[LLM Wiki Sync][Perf] total: ${totalMs}ms`);
+}
+
+function formatDuration(durationMs: number): string {
+  if (!durationMs) {
+    return "0s";
+  }
+  const seconds = Math.round(durationMs / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function isReviewPath(path: string): boolean {

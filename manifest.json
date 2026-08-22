@@ -1,7 +1,7 @@
 {
   "id": "llm-wiki-sync",
   "name": "LLM Wiki Sync",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "minAppVersion": "1.11.4",
   "description": "Sync Markdown notes with Notion bidirectionally with explicit conflict protection.",
   "author": "JIHO-0629",

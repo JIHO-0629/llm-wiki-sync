@@ -40,7 +40,7 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-LLM Wiki Sync v0.8.1 is a development branch for review.
+LLM Wiki Sync v0.8.2 is a development branch for review.
 
 For manual installation or release-candidate testing, place the plugin folder at:
 
@@ -93,6 +93,8 @@ Folder sync performs a conservative reconciliation workflow:
 - Moves valid linked Notion pages to the expected folder parent when the target is unambiguous.
 - Creates or updates notes using the existing baseline conflict model.
 - Re-fetches Notion hierarchy before making any Review decision.
+
+During folder and entire-vault sync, a progress modal shows the current phase, current note or folder, processed note count, elapsed time, and live counters. A global sync lock prevents overlapping sync, push, repair, initialize, and audit operations while a sync run is active.
 
 It does not delete Obsidian files, trash Notion pages, or automatically resolve conflicts. Ambiguous identity cases are reported and skipped.
 
@@ -160,12 +162,13 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 - Filenames are sanitized for Windows/path safety and path traversal protection.
 - Failed API calls do not create a fake clean state.
 - Bulk push processes files sequentially and continues after individual file failures.
-- Bulk push excludes `LLM Wiki Sync Pull/` by default to avoid pushing pulled copies as a duplicate hierarchy.
+- Bulk push excludes `LLM Wiki Sync Pull/` and `LLM Wiki Sync Review/` by default to avoid pushing system copies as duplicate hierarchy.
+- Folder and vault sync use a run-scoped Notion API cache only for the active sync run. The cache is discarded afterward and invalidated after relevant mutations.
 
 ## Known Limitations
 
 - Sync is manual, not background or real-time.
-- v0.8.1 folder sync focuses on safe Obsidian-to-Notion hierarchy reconciliation plus baseline-protected note sync.
+- v0.8.2 folder sync focuses on safe Obsidian-to-Notion hierarchy reconciliation plus baseline-protected note sync, with progress display and run-scoped performance caching.
 - Pull remains limited to its existing direct-child behavior and does not recreate recursive Notion hierarchy locally.
 - Folder rename identity recovery is limited; a renamed folder with no stored mapping may be treated as a new folder.
 - There is no standalone page numbering system in this repository; `notion_page_id` and sync baselines remain the identity mechanisms.
@@ -196,7 +199,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.8.1
+0.8.2
 
 ## License
 

@@ -29,7 +29,9 @@ import {
   syncFolderWithNotion,
   type FolderSyncStore,
   type ManagedPageRecord,
-  type QuarantineRecord
+  type QuarantineRecord,
+  type SyncCancelToken,
+  type SyncProgress
 } from "./sync/folderSync";
 import {
   SYNC_STATE_VERSION,
@@ -38,6 +40,7 @@ import {
   type SyncBaselineStore
 } from "./sync/baseline";
 import { normalizeNotionPageId } from "./sync/mapping";
+import { SyncExecutionLock } from "./sync/runLock";
 
 interface LlmWikiSyncSettings {
   notionRootPageUrl: string;
@@ -63,16 +66,30 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.1";
+const VERSION_LABEL = "v0.8.2";
+
+interface SyncRunState {
+  type: string | null;
+  scope: string | null;
+  progressModal: SyncProgressModal | null;
+  cancelToken: SyncCancelToken | null;
+}
 
 export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore, FolderSyncStore {
   settings: LlmWikiSyncSettings = DEFAULT_SETTINGS;
   private originalConsoleDebug: typeof console.debug | null = null;
+  private syncExecutionLock = new SyncExecutionLock();
+  private syncRunState: SyncRunState = {
+    type: null,
+    scope: null,
+    progressModal: null,
+    cancelToken: null
+  };
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.1 loaded");
+    console.debug("[LLM Wiki Sync] v0.8.2 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
@@ -88,7 +105,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "push-current-note-to-notion",
       name: "Push to Notion",
       callback: () => {
-        void this.pushCurrentNoteToNotion();
+        void this.runExclusiveSync("push-current-note", "Current note", () => this.pushCurrentNoteToNotion());
       }
     });
 
@@ -96,13 +113,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "sync-current-note",
       name: "Sync current note",
       callback: () => {
-        void syncCurrentNote({
-          app: this.app,
-          token: this.getNotionToken(),
-          rootPageUrl: this.settings.notionRootPageUrl,
-          baselineStore: this,
-          resolveParentPageId: this.resolveParentPageIdForFile
-        });
+        void this.syncCurrentNote();
       }
     });
 
@@ -110,7 +121,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "push-current-folder-to-notion",
       name: "LLM Wiki Sync: Push current folder to Notion",
       callback: () => {
-        void this.pushCurrentFolderToNotion();
+        void this.runExclusiveSync("push-current-folder", "Current folder", () => this.pushCurrentFolderToNotion());
       }
     });
 
@@ -142,7 +153,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "audit-current-folder-hierarchy",
       name: "LLM Wiki Sync: Audit current folder hierarchy",
       callback: () => {
-        void this.auditWorkspaceHierarchy("current-folder");
+        void this.runExclusiveSync("audit-current-folder", "Current folder", () => this.auditWorkspaceHierarchy("current-folder"));
       }
     });
 
@@ -150,7 +161,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "audit-entire-vault-hierarchy",
       name: "LLM Wiki Sync: Audit entire vault hierarchy",
       callback: () => {
-        void this.auditWorkspaceHierarchy("entire-vault");
+        void this.runExclusiveSync("audit-entire-vault", "Vault root", () => this.auditWorkspaceHierarchy("entire-vault"));
       }
     });
 
@@ -158,7 +169,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "initialize-current-folder-mappings",
       name: "LLM Wiki Sync: Initialize current folder mappings",
       callback: () => {
-        void this.initializeWorkspaceMappings("current-folder");
+        void this.runExclusiveSync("initialize-current-folder", "Current folder", () => this.initializeWorkspaceMappings("current-folder"));
       }
     });
 
@@ -166,7 +177,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "initialize-entire-vault-mappings",
       name: "LLM Wiki Sync: Initialize entire vault mappings",
       callback: () => {
-        void this.initializeWorkspaceMappings("entire-vault");
+        void this.runExclusiveSync("initialize-entire-vault", "Vault root", () => this.initializeWorkspaceMappings("entire-vault"));
       }
     });
 
@@ -213,13 +224,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     });
 
     this.addRibbonIcon("refresh-cw", "LLM Wiki Sync: Sync current note", () => {
-      void syncCurrentNote({
-        app: this.app,
-        token: this.getNotionToken(),
-        rootPageUrl: this.settings.notionRootPageUrl,
-        baselineStore: this,
-        resolveParentPageId: this.resolveParentPageIdForFile
-      });
+      void this.syncCurrentNote();
     });
 
     this.addRibbonIcon("arrow-up-circle", "LLM Wiki Sync: Keep Obsidian version", () => {
@@ -482,6 +487,16 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     return parent?.parentPageId ?? null;
   };
 
+  async syncCurrentNote(): Promise<void> {
+    await this.runExclusiveSync("sync-current-note", "Current note", () => syncCurrentNote({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      baselineStore: this,
+      resolveParentPageId: this.resolveParentPageIdForFile
+    }));
+  }
+
   async pullPagesFromNotion(): Promise<void> {
     await pullPagesFromNotion({
       app: this.app,
@@ -501,6 +516,11 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   }
 
   confirmPushEntireVaultToNotion(): void {
+    if (this.isSyncRunning()) {
+      new Notice("LLM Wiki Sync: A sync is already running.");
+      this.syncRunState.progressModal?.open();
+      return;
+    }
     new PushEntireVaultModal(this).open();
   }
 
@@ -518,12 +538,23 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   }
 
   async syncFolderWithNotion(folderPath: string): Promise<void> {
-    await syncFolderWithNotion({
-      app: this.app,
-      token: this.getNotionToken(),
-      rootPageUrl: this.settings.notionRootPageUrl,
-      store: this,
-      folderPath
+    await this.runExclusiveSync(folderPath ? "sync-folder" : "sync-entire-vault", folderPath || "Vault root", async () => {
+      const cancelToken: SyncCancelToken = { cancelRequested: false };
+      this.syncRunState.cancelToken = cancelToken;
+      const progressModal = new SyncProgressModal(this.app, folderPath || "Vault root", cancelToken);
+      this.syncRunState.progressModal = progressModal;
+      progressModal.open();
+      await syncFolderWithNotion({
+        app: this.app,
+        token: this.getNotionToken(),
+        rootPageUrl: this.settings.notionRootPageUrl,
+        store: this,
+        folderPath,
+        cancelToken,
+        showResultModal: false,
+        verboseDebugLogging: this.settings.verboseDebugLogging,
+        onProgress: (progress) => progressModal.update(progress)
+      });
     });
   }
 
@@ -570,6 +601,170 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     }
     new Notice(`LLM Wiki Sync: Mapping initialization complete - baselines initialized ${summary.baselinesInitialized}, already initialized ${summary.alreadyInitialized}, uninitialized divergence ${summary.uninitializedDivergence}, unmapped ${summary.unmapped}, ambiguous ${summary.ambiguous}, failed ${summary.failed}.`);
   }
+
+  isSyncRunning(): boolean {
+    return this.syncExecutionLock.snapshot.running;
+  }
+
+  async runExclusivePublic(type: string, scope: string, run: () => Promise<void>): Promise<void> {
+    await this.runExclusiveSync(type, scope, run);
+  }
+
+  private async runExclusiveSync(type: string, scope: string, run: () => Promise<void>): Promise<void> {
+    const result = await this.syncExecutionLock.run(type, scope, async () => {
+      this.syncRunState.type = type;
+      this.syncRunState.scope = scope;
+      try {
+        await run();
+      } finally {
+        this.syncRunState.type = null;
+        this.syncRunState.scope = null;
+        this.syncRunState.cancelToken = null;
+      }
+    });
+    if (!result.started) {
+      new Notice("LLM Wiki Sync: A sync is already running.");
+      this.syncRunState.progressModal?.open();
+    }
+  }
+}
+
+class SyncProgressModal extends Modal {
+  private readonly scopeLabel: string;
+  private readonly cancelToken: SyncCancelToken;
+  private latestProgress: SyncProgress | null = null;
+  private timerId: number | null = null;
+
+  constructor(app: App, scopeLabel: string, cancelToken: SyncCancelToken) {
+    super(app);
+    this.scopeLabel = scopeLabel;
+    this.cancelToken = cancelToken;
+  }
+
+  onOpen(): void {
+    this.render();
+    if (this.timerId === null) {
+      this.timerId = window.setInterval(() => this.render(), 1000);
+    }
+  }
+
+  onClose(): void {
+    if (this.timerId !== null) {
+      window.clearInterval(this.timerId);
+      this.timerId = null;
+    }
+    this.contentEl.empty();
+  }
+
+  update(progress: SyncProgress): void {
+    this.latestProgress = progress;
+    this.render();
+  }
+
+  private render(): void {
+    const { contentEl } = this;
+    if (!contentEl) {
+      return;
+    }
+    const progress = this.latestProgress;
+    const summary = progress?.summary;
+    const complete = progress?.phase === "complete" || progress?.phase === "cancelled";
+    contentEl.empty();
+
+    new Setting(contentEl)
+      .setName(complete ? "Folder sync complete" : "LLM Wiki Sync")
+      .setHeading();
+    contentEl.createEl("p", { text: `${complete ? "Synced" : "Syncing"} ${this.scopeLabel}` });
+    contentEl.createEl("p", { text: getProgressPhaseLabel(progress) });
+
+    if (progress?.total !== undefined && progress.total > 0) {
+      contentEl.createEl("p", { text: `${progress.processed ?? 0} of ${progress.total} notes processed` });
+      const bar = contentEl.createDiv({ cls: "llm-wiki-sync-progress-bar" });
+      const fill = bar.createDiv({ cls: "llm-wiki-sync-progress-bar-fill" });
+      fill.style.width = `${Math.min(100, Math.round(((progress.processed ?? 0) / progress.total) * 100))}%`;
+    } else {
+      contentEl.createEl("p", { text: "Preparing..." });
+    }
+
+    if (progress?.currentPath) {
+      contentEl.createEl("p", { text: `Current: ${progress.currentPath}` });
+    }
+
+    contentEl.createEl("p", { text: formatProgressCounters(summary) });
+    contentEl.createEl("p", { text: complete ? `Completed in ${formatDuration(progress?.elapsedMs ?? summary?.durationMs ?? 0)}` : `Elapsed ${formatClock(progress?.elapsedMs ?? 0)}` });
+    if (!complete) {
+      contentEl.createEl("p", { text: "Please keep Obsidian open." });
+    }
+
+    new Setting(contentEl)
+      .addButton((button) => {
+        button
+          .setButtonText(complete ? "Close" : "Cancel")
+          .onClick(() => {
+            if (complete) {
+              this.close();
+              return;
+            }
+            this.cancelToken.cancelRequested = true;
+            this.render();
+          });
+        if (!complete) {
+          button.setWarning();
+        }
+      });
+  }
+}
+
+function getProgressPhaseLabel(progress: SyncProgress | null): string {
+  if (!progress) {
+    return "Preparing sync";
+  }
+  const phase = `Phase ${progress.phaseIndex} of ${progress.phaseTotal}`;
+  const message = progress.message || getPhaseName(progress.phase);
+  return `${phase}: ${message}`;
+}
+
+function getPhaseName(phase: SyncProgress["phase"]): string {
+  if (phase === "local_scan") return "Scanning Obsidian";
+  if (phase === "remote_scan") return "Scanning Notion";
+  if (phase === "hierarchy_repair") return "Repairing folder hierarchy";
+  if (phase === "note_sync") return "Syncing notes";
+  if (phase === "verification") return "Verifying Notion hierarchy";
+  if (phase === "review_check") return "Checking Review candidates";
+  if (phase === "cancelled") return "Sync cancelled";
+  return "Sync complete";
+}
+
+function formatProgressCounters(summary?: Partial<import("./sync/folderSync").FolderSyncSummary>): string {
+  if (!summary) {
+    return "Created 0 · Updated 0 · Moved 0 · Conflicts 0 · Ambiguous 0 · Failed 0";
+  }
+  return [
+    `Created ${summary.created ?? 0}`,
+    `Updated ${summary.updated ?? 0}`,
+    `Moved ${summary.moved ?? 0}`,
+    `Folders ${summary.foldersCreated ?? 0}`,
+    `Clean ${summary.alreadyInSync ?? 0}`,
+    `Remote changed ${summary.remoteChanged ?? 0}`,
+    `Conflicts ${summary.conflicts ?? 0}`,
+    `Ambiguous ${summary.ambiguous ?? 0}`,
+    `Failed ${summary.failed ?? 0}`
+  ].join(" · ");
+}
+
+function formatClock(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
 }
 
 class PushEntireVaultModal extends Modal {
@@ -603,7 +798,7 @@ class PushEntireVaultModal extends Modal {
           .setCta()
           .onClick(() => {
             this.close();
-            void this.plugin.pushEntireVaultToNotion();
+            void this.plugin.runExclusivePublic("push-entire-vault", "Vault root", () => this.plugin.pushEntireVaultToNotion());
           });
       });
   }
@@ -668,7 +863,7 @@ class RepairHierarchyModal extends Modal {
           .setCta()
           .onClick(() => {
             this.close();
-            void this.plugin.repairWorkspaceHierarchy(this.hierarchyScope);
+            void this.plugin.runExclusivePublic("repair-hierarchy", this.hierarchyScope, () => this.plugin.repairWorkspaceHierarchy(this.hierarchyScope));
           });
       });
   }
@@ -760,15 +955,10 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .setDesc("Use Sync current note for normal synchronization.")
       .addButton((button) => {
         button
-          .setButtonText("Sync current note")
+          .setButtonText(this.plugin.isSyncRunning() ? "Sync in progress..." : "Sync current note")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void syncCurrentNote({
-              app: this.app,
-              token: this.plugin.getNotionToken(),
-              rootPageUrl: this.plugin.settings.notionRootPageUrl,
-              baselineStore: this.plugin,
-              resolveParentPageId: this.plugin.resolveParentPageIdForFile
-            });
+            void this.plugin.syncCurrentNote();
           });
       });
 
@@ -777,7 +967,8 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .setDesc("Choose a folder and reconcile its Markdown notes and Notion hierarchy.")
       .addButton((button) => {
         button
-          .setButtonText("Sync folder")
+          .setButtonText(this.plugin.isSyncRunning() ? "Sync in progress..." : "Sync folder")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
             this.plugin.openFolderSyncPicker();
           });
@@ -788,7 +979,8 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .setDesc("Reconcile all supported Markdown notes in this vault with Notion.")
       .addButton((button) => {
         button
-          .setButtonText("Sync entire vault")
+          .setButtonText(this.plugin.isSyncRunning() ? "Sync in progress..." : "Sync entire vault")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
             void this.plugin.syncFolderWithNotion("");
           });
@@ -804,13 +996,15 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .addButton((button) => {
         button
           .setButtonText("Push current folder")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void this.plugin.pushCurrentFolderToNotion();
+            void this.plugin.runExclusivePublic("push-current-folder", "Current folder", () => this.plugin.pushCurrentFolderToNotion());
           });
       })
       .addButton((button) => {
         button
           .setButtonText("Push entire vault")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
             this.plugin.confirmPushEntireVaultToNotion();
           });
@@ -822,15 +1016,17 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .addButton((button) => {
         button
           .setButtonText("Audit current folder")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void this.plugin.auditWorkspaceHierarchy("current-folder");
+            void this.plugin.runExclusivePublic("audit-current-folder", "Current folder", () => this.plugin.auditWorkspaceHierarchy("current-folder"));
           });
       })
       .addButton((button) => {
         button
           .setButtonText("Audit entire vault")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void this.plugin.auditWorkspaceHierarchy("entire-vault");
+            void this.plugin.runExclusivePublic("audit-entire-vault", "Vault root", () => this.plugin.auditWorkspaceHierarchy("entire-vault"));
           });
       });
 
@@ -840,15 +1036,17 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       .addButton((button) => {
         button
           .setButtonText("Initialize current folder")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void this.plugin.initializeWorkspaceMappings("current-folder");
+            void this.plugin.runExclusivePublic("initialize-current-folder", "Current folder", () => this.plugin.initializeWorkspaceMappings("current-folder"));
           });
       })
       .addButton((button) => {
         button
           .setButtonText("Initialize entire vault")
+          .setDisabled(this.plugin.isSyncRunning())
           .onClick(() => {
-            void this.plugin.initializeWorkspaceMappings("entire-vault");
+            void this.plugin.runExclusivePublic("initialize-entire-vault", "Vault root", () => this.plugin.initializeWorkspaceMappings("entire-vault"));
           });
       });
 
