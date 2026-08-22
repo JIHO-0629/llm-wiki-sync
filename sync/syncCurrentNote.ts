@@ -18,6 +18,7 @@ export interface SyncCurrentNoteOptions {
   token: string;
   rootPageUrl: string;
   baselineStore: SyncBaselineStore;
+  resolveParentPageId?: (file: TFile) => Promise<string | null>;
 }
 
 export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<void> {
@@ -82,6 +83,7 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
 
   try {
     const client = new NotionClient({ token });
+    const hierarchyMoved = await repairLinkedNoteHierarchyIfNeeded(options, client, file, mapping.pageId, logPrefix);
     const localSnapshot = await getLocalSyncSnapshot(options.app, file);
     const remoteSnapshot = await getRemoteSyncSnapshot(client, mapping.pageId);
     const change = compareSnapshotsToBaseline(baseline, localSnapshot, remoteSnapshot);
@@ -90,7 +92,9 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
 
     if (change.state === "CLEAN") {
       console.debug(`${logPrefix} action: NONE`);
-      new Notice("LLM Wiki Sync: Already in sync.");
+      new Notice(hierarchyMoved
+        ? "LLM Wiki Sync: Moved to matching Notion folder. Content already in sync."
+        : "LLM Wiki Sync: Already in sync.");
       return;
     }
     if (change.state === "CONFLICT") {
@@ -144,6 +148,35 @@ async function pullActiveMappedNote(
   console.debug(`[LLM Wiki Sync][Baseline][${runId}] advanced`, pageId);
 }
 
+async function repairLinkedNoteHierarchyIfNeeded(
+  options: SyncCurrentNoteOptions,
+  client: NotionClient,
+  file: TFile,
+  pageId: string,
+  logPrefix: string
+): Promise<boolean> {
+  if (!options.resolveParentPageId) {
+    return false;
+  }
+
+  const expectedParentPageId = await options.resolveParentPageId(file);
+  if (!expectedParentPageId) {
+    return false;
+  }
+
+  const pageDetails = await client.getPageDetails(pageId);
+  if (
+    pageDetails.parentType === "page_id" &&
+    normalizePageId(pageDetails.parentPageId) === normalizePageId(expectedParentPageId)
+  ) {
+    return false;
+  }
+
+  await client.movePageToPage(pageId, expectedParentPageId);
+  console.debug(`${logPrefix} hierarchy repaired`, pageId, expectedParentPageId);
+  return true;
+}
+
 async function assertFinalClean(app: App, baselineStore: SyncBaselineStore, client: NotionClient, file: TFile, pageId: string, runId: string): Promise<void> {
   const baseline = baselineStore.getSyncBaseline(pageId);
   if (!baseline) throw new Error("final baseline missing");
@@ -167,6 +200,10 @@ function createRunId(): string {
 function getErrorMessage(error: unknown): string {
   if (error instanceof NotionApiError) return `${error.status} - ${error.message}`;
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizePageId(pageId: string): string {
+  return pageId.replace(/-/g, "").toLowerCase();
 }
 
 class SyncConflictModal extends Modal {

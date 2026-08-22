@@ -43,6 +43,7 @@ export interface NotionPageDetails {
   object: string;
   title: string;
   parentType: string;
+  parentPageId: string;
   lastEditedTime: string;
   response: RequestUrlResponse;
 }
@@ -83,7 +84,10 @@ export class NotionClient {
 
   async listRootChildPages(rootPageId: string): Promise<NotionChildPage[]> {
     console.debug("[LLM Wiki Sync][Pull] Root page id:", rootPageId);
+    return this.listChildPages(rootPageId, "Pull");
+  }
 
+  async listChildPages(parentPageId: string, label: "Pull" | "Hierarchy" = "Hierarchy"): Promise<NotionChildPage[]> {
     const childPages: NotionChildPage[] = [];
     let nextCursor: string | null = null;
 
@@ -95,10 +99,10 @@ export class NotionClient {
 
       const response = await this.request(
         {
-          url: `https://api.notion.com/v1/blocks/${rootPageId}/children?${searchParams.toString()}`,
+          url: `https://api.notion.com/v1/blocks/${parentPageId}/children?${searchParams.toString()}`,
           method: "GET"
         },
-        "Pull"
+        label
       );
 
       const body = response.json as Record<string, unknown>;
@@ -186,6 +190,23 @@ export class NotionClient {
     return parsePageDetails(response, pageId);
   }
 
+  async movePageToPage(pageId: string, parentPageId: string): Promise<NotionPageDetails> {
+    const response = await this.request(
+      {
+        url: `https://api.notion.com/v1/pages/${pageId}/move`,
+        method: "POST",
+        body: JSON.stringify({
+          parent: {
+            type: "page_id",
+            page_id: parentPageId
+          }
+        })
+      },
+      "Move page"
+    );
+    return parsePageDetails(response, pageId);
+  }
+
   async createChildPage(options: CreateChildPageOptions): Promise<CreatedNotionPage> {
     const body = {
       parent: {
@@ -226,7 +247,7 @@ export class NotionClient {
 
   private async request(
     options: { url: string; method: string; body?: string },
-    label: "Root check" | "Create page" | "Pull" | "Pull Markdown" | "Push Update" | "Push Title Update"
+    label: "Root check" | "Create page" | "Pull" | "Hierarchy" | "Pull Markdown" | "Push Update" | "Push Title Update" | "Move page"
   ): Promise<RequestUrlResponse> {
     console.debug(`[LLM Wiki Sync][${label}] HTTP method`, options.method);
     console.debug(`[LLM Wiki Sync][${label}] endpoint`, options.url);
@@ -334,6 +355,7 @@ function parsePageDetails(response: RequestUrlResponse, expectedPageId: string):
   const lastEditedTime = typeof body.last_edited_time === "string" ? body.last_edited_time : "";
   const parent = body.parent && typeof body.parent === "object" ? body.parent as Record<string, unknown> : null;
   const parentType = parent && typeof parent.type === "string" ? parent.type : "";
+  const parentPageId = parent && typeof parent.page_id === "string" ? parent.page_id : "";
   const properties = body.properties && typeof body.properties === "object" ? body.properties as Record<string, unknown> : {};
   const titleProperty = properties.title && typeof properties.title === "object" ? properties.title as Record<string, unknown> : null;
   const titleItems = titleProperty && Array.isArray(titleProperty.title) ? titleProperty.title : [];
@@ -347,7 +369,7 @@ function parsePageDetails(response: RequestUrlResponse, expectedPageId: string):
     throw new NotionApiError(response.status, "Notion page response did not match the mapped page", body);
   }
 
-  return { id, object, title, parentType, lastEditedTime, response };
+  return { id, object, title, parentType, parentPageId, lastEditedTime, response };
 }
 
 function parseCreatedPageResponse(
