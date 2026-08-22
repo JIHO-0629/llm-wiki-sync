@@ -1,11 +1,13 @@
 ﻿import {
   App,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting
 } from "obsidian";
 import { extractNotionPageId, NotionApiError, NotionClient } from "./notionClient";
+import { pushCurrentFolderToNotion, pushEntireVaultToNotion, type FolderMapping } from "./sync/bulkPush";
 import { pullPagesFromNotion } from "./sync/pull";
 import { pushCurrentNoteToNotion } from "./sync/push";
 import { debugActiveMapping } from "./sync/debug";
@@ -26,6 +28,7 @@ interface LlmWikiSyncSettings {
   verboseDebugLogging: boolean;
   syncStateVersion: 1;
   syncStates: Record<string, SyncBaseline>;
+  folderMappings: Record<string, FolderMapping>;
   [key: string]: unknown;
 }
 
@@ -34,11 +37,12 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
   connectionStatus: "not-tested",
   verboseDebugLogging: false,
   syncStateVersion: SYNC_STATE_VERSION,
-  syncStates: {}
+  syncStates: {},
+  folderMappings: {}
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.7.1";
+const VERSION_LABEL = "v0.8.0";
 
 export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore {
   settings: LlmWikiSyncSettings = DEFAULT_SETTINGS;
@@ -47,7 +51,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.7.1 loaded");
+    console.debug("[LLM Wiki Sync] v0.8.0 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
@@ -77,6 +81,22 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
           rootPageUrl: this.settings.notionRootPageUrl,
           baselineStore: this
         });
+      }
+    });
+
+    this.addCommand({
+      id: "push-current-folder-to-notion",
+      name: "LLM Wiki Sync: Push current folder to Notion",
+      callback: () => {
+        void this.pushCurrentFolderToNotion();
+      }
+    });
+
+    this.addCommand({
+      id: "push-entire-vault-to-notion",
+      name: "LLM Wiki Sync: Push entire vault to Notion",
+      callback: () => {
+        this.confirmPushEntireVaultToNotion();
       }
     });
 
@@ -183,12 +203,34 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     await this.saveSettings();
   }
 
+  getFolderMapping(folderPath: string): FolderMapping | null {
+    this.ensureSyncStateContainer();
+    const mapping = this.settings.folderMappings[folderPath];
+    if (!mapping || typeof mapping !== "object") {
+      return null;
+    }
+    if (typeof mapping.notionPageId !== "string" || typeof mapping.lastKnownPath !== "string") {
+      return null;
+    }
+
+    return mapping;
+  }
+
+  async saveFolderMapping(folderPath: string, mapping: FolderMapping): Promise<void> {
+    this.ensureSyncStateContainer();
+    this.settings.folderMappings[folderPath] = mapping;
+    await this.saveSettings();
+  }
+
   private ensureSyncStateContainer(): void {
     if (this.settings.syncStateVersion !== SYNC_STATE_VERSION) {
       this.settings.syncStateVersion = SYNC_STATE_VERSION;
     }
     if (!this.settings.syncStates || typeof this.settings.syncStates !== "object") {
       this.settings.syncStates = {};
+    }
+    if (!this.settings.folderMappings || typeof this.settings.folderMappings !== "object") {
+      this.settings.folderMappings = {};
     }
   }
 
@@ -309,6 +351,69 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       baselineStore: this
     });
   }
+
+  async pushCurrentFolderToNotion(): Promise<void> {
+    await pushCurrentFolderToNotion({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this
+    });
+  }
+
+  confirmPushEntireVaultToNotion(): void {
+    new PushEntireVaultModal(this).open();
+  }
+
+  async pushEntireVaultToNotion(): Promise<void> {
+    await pushEntireVaultToNotion({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this
+    });
+  }
+}
+
+class PushEntireVaultModal extends Modal {
+  private plugin: LlmWikiSyncPlugin;
+
+  constructor(plugin: LlmWikiSyncPlugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    new Setting(contentEl)
+      .setName("Push entire vault")
+      .setHeading();
+    new Setting(contentEl)
+      .setName("Create or update Notion pages for all Markdown notes in this vault.")
+      .setDesc("Existing conflict protection will still apply.");
+    new Setting(contentEl)
+      .addButton((button) => {
+        button
+          .setButtonText("Cancel")
+          .onClick(() => {
+            this.close();
+          });
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Push entire vault")
+          .setCta()
+          .onClick(() => {
+            this.close();
+            void this.plugin.pushEntireVaultToNotion();
+          });
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 class LlmWikiSyncSettingTab extends PluginSettingTab {
@@ -402,6 +507,28 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
               rootPageUrl: this.plugin.settings.notionRootPageUrl,
               baselineStore: this.plugin
             });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Push current folder")
+      .setDesc("Push Markdown notes in the active note's folder and subfolders to Notion.")
+      .addButton((button) => {
+        button
+          .setButtonText("Push current folder")
+          .onClick(() => {
+            void this.plugin.pushCurrentFolderToNotion();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Push entire vault")
+      .setDesc("Push all supported Markdown notes in this vault to Notion after confirmation.")
+      .addButton((button) => {
+        button
+          .setButtonText("Push entire vault")
+          .onClick(() => {
+            this.plugin.confirmPushEntireVaultToNotion();
           });
       });
 

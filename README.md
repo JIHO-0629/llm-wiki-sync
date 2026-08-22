@@ -13,6 +13,9 @@ LLM Wiki Sync is an Obsidian desktop plugin for manual, safety-first synchroniza
 - Body synchronization
 - Title and filename synchronization
 - `Sync current note` automatic direction detection
+- Push current folder to Notion
+- Push entire vault to Notion
+- Obsidian folder hierarchy export to Notion pages
 - Persisted synchronization baseline
 - Conflict detection
 - Explicit `Keep Obsidian` and `Keep Notion` resolution
@@ -37,7 +40,7 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-LLM Wiki Sync v0.7.1 is prepared as an Obsidian Community Plugin submission candidate.
+LLM Wiki Sync v0.8.0 is a development branch for review.
 
 For manual installation or release-candidate testing, place the plugin folder at:
 
@@ -75,6 +78,22 @@ For old notes that already have `notion_page_id` but no v0.6 baseline, run `Init
 
 Unlinked local notes are created as child pages under the configured Notion root page. Linked notes sync in the safe direction determined by the baseline state.
 
+## Bulk Push
+
+Use `Push current folder to Notion` to export the active Markdown note's folder and subfolders. If the active note is in the vault root, the vault root is used.
+
+Use `Push entire vault to Notion` to export all supported Markdown notes in the vault after confirmation. Folder hierarchy is preserved by creating Notion pages for folders from top to bottom, then creating Markdown note pages under their corresponding folder pages.
+
+Bulk push keeps the same baseline conflict protection as single-note push:
+
+- Clean linked notes are skipped.
+- Locally changed linked notes update Notion.
+- Remotely changed linked notes are skipped.
+- Conflicted linked notes are skipped.
+- Unlinked Markdown notes are created in Notion, then receive local `notion_page_id` frontmatter and a normal sync baseline.
+
+Folder-to-Notion page mappings are stored in plugin data, not in Markdown frontmatter. The vault root maps to the configured Notion root page and does not create an extra folder page.
+
 ## Conflict Handling
 
 The plugin does not automatically merge or choose the newest version. If both Obsidian and Notion changed since the last baseline, sync is blocked.
@@ -91,6 +110,8 @@ After a successful resolution, the baseline is refreshed and the state returns t
 Advanced commands remain available from the command palette:
 
 - `Push to Notion`
+- `LLM Wiki Sync: Push current folder to Notion`
+- `LLM Wiki Sync: Push entire vault to Notion`
 - `Pull from Notion`
 - `Initialize sync baseline`
 - `Debug active mapping`
@@ -110,12 +131,16 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 - Rename collisions stop the rename and do not overwrite files.
 - Filenames are sanitized for Windows/path safety and path traversal protection.
 - Failed API calls do not create a fake clean state.
+- Bulk push processes files sequentially and continues after individual file failures.
+- Bulk push excludes `LLM Wiki Sync Pull/` by default to avoid pushing pulled copies as a duplicate hierarchy.
 
 ## Known Limitations
 
 - Sync is manual, not background or real-time.
 - The normal workflow targets direct pages under the configured root page.
-- Recursive nested page synchronization is not implemented.
+- v0.8.0 bulk hierarchy support is Obsidian -> Notion only.
+- Pull remains limited to its existing direct-child behavior and does not recreate recursive Notion hierarchy locally.
+- Folder rename identity recovery is limited; a renamed folder with no stored mapping may be treated as a new folder.
 - Images and attachments are not synchronized.
 - Notion database/data-source synchronization is not supported.
 - Standalone `.yaml` and `.yml` files are not synchronized; Obsidian YAML frontmatter in Markdown notes is preserved for local mapping metadata.
@@ -127,9 +152,9 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 
 The Notion token is stored through Obsidian SecretStorage when available. It is not stored in plugin `data.json`.
 
-The plugin sends requests to the Notion API only when the user runs connection testing, sync, pull, push, baseline initialization, debug lookup, or conflict resolution commands. It does not use analytics or telemetry.
+The plugin sends requests to the Notion API only when the user runs connection testing, sync, pull, push, bulk push, baseline initialization, debug lookup, or conflict resolution commands. It does not use analytics or telemetry.
 
-Plugin `data.json` may contain Notion page IDs, root page configuration, sync baselines, and fingerprints. Do not publish user-specific plugin data.
+Plugin `data.json` may contain Notion page IDs, folder mappings, root page configuration, sync baselines, and fingerprints. Do not publish user-specific plugin data.
 
 ## Development / Build
 
@@ -143,7 +168,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.7.1
+0.8.0
 
 ## License
 

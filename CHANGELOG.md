@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0
+
+- Added safe bulk push from Obsidian to Notion for the current folder or entire vault.
+- Preserved Obsidian folder hierarchy by creating folder pages in Notion from top to bottom.
+- Added persistent folder-to-Notion page mappings in plugin data.
+- Refactored single-note Push to use a reusable file-based push operation.
+- Kept existing baseline conflict protection for linked notes during bulk push.
+- Excluded non-Markdown files and `LLM Wiki Sync Pull/` from bulk push.
+- Documented that recursive hierarchy support is currently Obsidian -> Notion only; Pull remains limited to existing behavior.
+- Added bulk push regression coverage for hierarchy, exclusions, mappings, conflict safety, failure continuation, and native Markdown page creation.
+
 ## 0.7.1
 
 - Updated the plugin manifest description to satisfy Obsidian Community automated review.
