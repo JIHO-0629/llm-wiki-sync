@@ -6,11 +6,12 @@ import { pushFileToNotion, type PushFileResult } from "./push";
 export interface FolderMapping {
   notionPageId: string;
   lastKnownPath: string;
+  rootPageId: string;
 }
 
 export interface FolderMappingStore {
-  getFolderMapping(folderPath: string): FolderMapping | null;
-  saveFolderMapping(folderPath: string, mapping: FolderMapping): Promise<void>;
+  getFolderMapping(mappingKey: string): FolderMapping | null;
+  saveFolderMapping(mappingKey: string, mapping: FolderMapping): Promise<void>;
 }
 
 export interface BulkPushStore extends SyncBaselineStore, FolderMappingStore {}
@@ -94,6 +95,7 @@ async function pushSelectedFilesToNotion(options: BulkPushOptions, selection: { 
     new Notice("LLM Wiki Sync: Notion Root Page URL is invalid");
     return;
   }
+  const normalizedRootPageId = normalizeNotionPageId(rootPageId);
 
   const client = new NotionClient({ token });
   try {
@@ -113,6 +115,7 @@ async function pushSelectedFilesToNotion(options: BulkPushOptions, selection: { 
         client,
         store: options.store,
         rootPageId,
+        normalizedRootPageId,
         folderPath,
         counts,
         runId
@@ -148,6 +151,7 @@ async function ensureFolderPage(options: {
   client: NotionClient;
   store: FolderMappingStore;
   rootPageId: string;
+  normalizedRootPageId: string;
   folderPath: string;
   counts: BulkPushCounts;
   runId: string;
@@ -157,7 +161,8 @@ async function ensureFolderPage(options: {
     return options.rootPageId;
   }
 
-  const storedMapping = options.store.getFolderMapping(normalizedFolderPath);
+  const mappingKey = getFolderMappingKey(options.normalizedRootPageId, normalizedFolderPath);
+  const storedMapping = getStoredFolderMapping(options.store, mappingKey, normalizedFolderPath, options.normalizedRootPageId);
   if (storedMapping) {
     try {
       await options.client.getPageDetails(storedMapping.notionPageId);
@@ -181,9 +186,10 @@ async function ensureFolderPage(options: {
     pushedAt
   });
 
-  await options.store.saveFolderMapping(normalizedFolderPath, {
+  await options.store.saveFolderMapping(mappingKey, {
     notionPageId: createdPage.id,
-    lastKnownPath: normalizedFolderPath
+    lastKnownPath: normalizedFolderPath,
+    rootPageId: options.normalizedRootPageId
   });
   options.counts.foldersCreated += 1;
   console.debug(`[LLM Wiki Sync][Bulk Push][${options.runId}] folder created:`, normalizedFolderPath, createdPage.id);
@@ -225,6 +231,37 @@ function getBaseName(path: string): string {
   const normalized = normalizeVaultFolderPath(path);
   const index = normalized.lastIndexOf("/");
   return index === -1 ? normalized : normalized.slice(index + 1);
+}
+
+function getStoredFolderMapping(
+  store: FolderMappingStore,
+  mappingKey: string,
+  folderPath: string,
+  rootPageId: string
+): FolderMapping | null {
+  const scopedMapping = store.getFolderMapping(mappingKey);
+  if (isMappingForRoot(scopedMapping, rootPageId)) {
+    return scopedMapping;
+  }
+
+  const legacyMapping = store.getFolderMapping(folderPath);
+  if (isMappingForRoot(legacyMapping, rootPageId)) {
+    return legacyMapping;
+  }
+
+  return null;
+}
+
+function isMappingForRoot(mapping: FolderMapping | null, rootPageId: string): mapping is FolderMapping {
+  return Boolean(mapping && normalizeNotionPageId(mapping.rootPageId) === rootPageId);
+}
+
+function getFolderMappingKey(rootPageId: string, folderPath: string): string {
+  return `${rootPageId}::${folderPath}`;
+}
+
+function normalizeNotionPageId(pageId: string): string {
+  return pageId.replace(/-/g, "").toLowerCase();
 }
 
 function applyFileResult(counts: BulkPushCounts, result: PushFileResult): void {

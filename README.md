@@ -92,7 +92,7 @@ Bulk push keeps the same baseline conflict protection as single-note push:
 - Conflicted linked notes are skipped.
 - Unlinked Markdown notes are created in Notion, then receive local `notion_page_id` frontmatter and a normal sync baseline.
 
-Folder-to-Notion page mappings are stored in plugin data, not in Markdown frontmatter. The vault root maps to the configured Notion root page and does not create an extra folder page.
+Folder-to-Notion page mappings are stored in plugin data, not in Markdown frontmatter. They are scoped to the configured Notion root page, so changing the root page creates or reuses a separate folder hierarchy. The vault root maps to the configured Notion root page and does not create an extra folder page.
 
 ## Conflict Handling
 

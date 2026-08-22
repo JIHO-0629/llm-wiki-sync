@@ -21,6 +21,7 @@ const createRequests = [];
 const markdownPatches = [];
 let nextPageId = 1;
 const ROOT_PAGE_ID = "11111111-1111-1111-1111-111111111111";
+const ROOT_B_PAGE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
 class Notice {
   constructor(message) {
@@ -232,11 +233,11 @@ function makeStore() {
     async saveSyncBaseline(pageId, baseline) {
       this.baselines[normalizePageId(pageId)] = baseline;
     },
-    getFolderMapping(folderPath) {
-      return this.folderMappings[folderPath] ?? null;
+    getFolderMapping(mappingKey) {
+      return this.folderMappings[mappingKey] ?? null;
     },
-    async saveFolderMapping(folderPath, mapping) {
-      this.folderMappings[folderPath] = mapping;
+    async saveFolderMapping(mappingKey, mapping) {
+      this.folderMappings[mappingKey] = mapping;
     }
   };
 }
@@ -285,6 +286,10 @@ function normalizePageId(pageId) {
   return pageId.replace(/-/g, "").toLowerCase();
 }
 
+function mappingKey(rootPageId, folderPath) {
+  return `${normalizePageId(rootPageId)}::${folderPath}`;
+}
+
 pages.clear();
 notices.length = 0;
 createRequests.length = 0;
@@ -319,6 +324,11 @@ const files = [
 ];
 const app = createApp(files);
 const store = makeStore();
+const rootAProjectsKey = mappingKey(ROOT_PAGE_ID, "10_Projects");
+const rootAKnowledgeKey = mappingKey(ROOT_PAGE_ID, "20_Knowledge");
+const rootAMedicineKey = mappingKey(ROOT_PAGE_ID, "20_Knowledge/Medicine");
+const rootAAfterKey = mappingKey(ROOT_PAGE_ID, "After");
+const rootABadFolderKey = mappingKey(ROOT_PAGE_ID, "BadFolder");
 store.baselines[normalizePageId("clean-page")] = makeBaseline("clean-page", "Clean", "\nclean\n", "Clean", "clean\n");
 store.baselines[normalizePageId("local-page")] = makeBaseline("local-page", "Local", "\nold\n", "Local", "old\n");
 store.baselines[normalizePageId("remote-page")] = makeBaseline("remote-page", "Remote", "\nremote\n", "Remote", "remote\n");
@@ -351,12 +361,13 @@ const projectA = createRequests.find((request) => request.title === "Project A")
 assert.ok(projectsFolder);
 assert.ok(projectA);
 assert.equal(projectsFolder.parentPageId, ROOT_PAGE_ID);
-assert.equal(projectA.parentPageId, store.folderMappings["10_Projects"].notionPageId);
+assert.equal(projectA.parentPageId, store.folderMappings[rootAProjectsKey].notionPageId);
+assert.equal(store.folderMappings[rootAProjectsKey].rootPageId, normalizePageId(ROOT_PAGE_ID));
 
 assert.equal(createRequests.find((request) => request.title === "20_Knowledge").parentPageId, ROOT_PAGE_ID);
-assert.equal(createRequests.find((request) => request.title === "Medicine").parentPageId, store.folderMappings["20_Knowledge"].notionPageId);
-assert.equal(createRequests.find((request) => request.title === "Heart").parentPageId, store.folderMappings["20_Knowledge/Medicine"].notionPageId);
-assert.equal(createRequests.find((request) => request.title === "Lung").parentPageId, store.folderMappings["20_Knowledge/Medicine"].notionPageId);
+assert.equal(createRequests.find((request) => request.title === "Medicine").parentPageId, store.folderMappings[rootAKnowledgeKey].notionPageId);
+assert.equal(createRequests.find((request) => request.title === "Heart").parentPageId, store.folderMappings[rootAMedicineKey].notionPageId);
+assert.equal(createRequests.find((request) => request.title === "Lung").parentPageId, store.folderMappings[rootAMedicineKey].notionPageId);
 
 const localPatch = markdownPatches.find((patch) => patch.pageId === "local-page");
 assert.ok(localPatch);
@@ -365,9 +376,9 @@ assert.equal(markdownPatches.some((patch) => patch.pageId === "remote-page"), fa
 assert.equal(markdownPatches.some((patch) => patch.pageId === "conflict-page"), false);
 assert.equal(markdownPatches.some((patch) => patch.pageId === "duplicate-page"), false);
 
-assert.equal(store.folderMappings.BadFolder, undefined);
+assert.equal(store.folderMappings[rootABadFolderKey], undefined);
 assert.ok(createRequests.some((request) => request.title === "After"));
-assert.ok(createRequests.some((request) => request.title === "Note" && request.parentPageId === store.folderMappings.After.notionPageId));
+assert.ok(createRequests.some((request) => request.title === "Note" && request.parentPageId === store.folderMappings[rootAAfterKey].notionPageId));
 
 const largeCreate = createRequests.find((request) => request.title === "Large");
 assert.ok(largeCreate);
@@ -380,6 +391,35 @@ assert.ok(notices.at(-1).includes("Bulk push complete"));
 assert.ok(notices.at(-1).includes("remote changed 1"));
 assert.ok(notices.at(-1).includes("conflicts 1"));
 assert.ok(notices.at(-1).includes("failed 4"));
+
+const rootAFolderCreates = createRequests.filter((request) => ["10_Projects", "20_Knowledge", "Medicine", "After"].includes(request.title)).length;
+await pushEntireVaultToNotion({
+  app,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store
+});
+const rootAFolderCreatesAfterSecondPush = createRequests.filter((request) => ["10_Projects", "20_Knowledge", "Medicine", "After"].includes(request.title)).length;
+assert.equal(rootAFolderCreatesAfterSecondPush, rootAFolderCreates);
+
+addPage(ROOT_B_PAGE_ID, "Root B", "", ROOT_B_PAGE_ID);
+await pushEntireVaultToNotion({
+  app,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_B_PAGE_ID.replace(/-/g, "")}`,
+  store
+});
+const rootBProjectsKey = mappingKey(ROOT_B_PAGE_ID, "10_Projects");
+const rootBKnowledgeKey = mappingKey(ROOT_B_PAGE_ID, "20_Knowledge");
+const rootBMedicineKey = mappingKey(ROOT_B_PAGE_ID, "20_Knowledge/Medicine");
+assert.ok(store.folderMappings[rootBProjectsKey]);
+assert.ok(store.folderMappings[rootBKnowledgeKey]);
+assert.ok(store.folderMappings[rootBMedicineKey]);
+assert.notEqual(store.folderMappings[rootBProjectsKey].notionPageId, store.folderMappings[rootAProjectsKey].notionPageId);
+assert.equal(store.folderMappings[rootBProjectsKey].rootPageId, normalizePageId(ROOT_B_PAGE_ID));
+const rootBProjectsFolder = createRequests.find((request) => request.title === "10_Projects" && request.parentPageId === ROOT_B_PAGE_ID);
+assert.ok(rootBProjectsFolder);
+assert.equal(createRequests.find((request) => request.title === "Medicine" && request.parentPageId === store.folderMappings[rootBKnowledgeKey].notionPageId).parentPageId, store.folderMappings[rootBKnowledgeKey].notionPageId);
 
 pages.clear();
 notices.length = 0;

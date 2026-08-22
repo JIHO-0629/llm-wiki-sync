@@ -203,22 +203,26 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     await this.saveSettings();
   }
 
-  getFolderMapping(folderPath: string): FolderMapping | null {
+  getFolderMapping(mappingKey: string): FolderMapping | null {
     this.ensureSyncStateContainer();
-    const mapping = this.settings.folderMappings[folderPath];
+    const mapping = this.settings.folderMappings[mappingKey];
     if (!mapping || typeof mapping !== "object") {
       return null;
     }
-    if (typeof mapping.notionPageId !== "string" || typeof mapping.lastKnownPath !== "string") {
+    if (
+      typeof mapping.notionPageId !== "string" ||
+      typeof mapping.lastKnownPath !== "string" ||
+      typeof mapping.rootPageId !== "string"
+    ) {
       return null;
     }
 
     return mapping;
   }
 
-  async saveFolderMapping(folderPath: string, mapping: FolderMapping): Promise<void> {
+  async saveFolderMapping(mappingKey: string, mapping: FolderMapping): Promise<void> {
     this.ensureSyncStateContainer();
-    this.settings.folderMappings[folderPath] = mapping;
+    this.settings.folderMappings[mappingKey] = mapping;
     await this.saveSettings();
   }
 
