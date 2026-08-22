@@ -1,5 +1,6 @@
 ﻿import {
   App,
+  FuzzySuggestModal,
   Modal,
   Notice,
   Plugin,
@@ -19,8 +20,15 @@ import {
   auditWorkspaceHierarchy,
   initializeWorkspaceMappings,
   repairWorkspaceHierarchy,
+  resolveNotionParentForFile,
   type HierarchyScope
 } from "./sync/hierarchy";
+import {
+  getSelectableFolderPaths,
+  syncFolderWithNotion,
+  type FolderSyncStore,
+  type QuarantineRecord
+} from "./sync/folderSync";
 import {
   SYNC_STATE_VERSION,
   validateSyncBaseline,
@@ -36,6 +44,7 @@ interface LlmWikiSyncSettings {
   syncStateVersion: 1;
   syncStates: Record<string, SyncBaseline>;
   folderMappings: Record<string, FolderMapping>;
+  quarantineRecords: Record<string, QuarantineRecord>;
   [key: string]: unknown;
 }
 
@@ -45,20 +54,21 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
   verboseDebugLogging: false,
   syncStateVersion: SYNC_STATE_VERSION,
   syncStates: {},
-  folderMappings: {}
+  folderMappings: {},
+  quarantineRecords: {}
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.0";
+const VERSION_LABEL = "v0.8.1";
 
-export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore {
+export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore, FolderSyncStore {
   settings: LlmWikiSyncSettings = DEFAULT_SETTINGS;
   private originalConsoleDebug: typeof console.debug | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.0 loaded");
+    console.debug("[LLM Wiki Sync] v0.8.1 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
@@ -104,6 +114,22 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       name: "LLM Wiki Sync: Push entire vault to Notion",
       callback: () => {
         this.confirmPushEntireVaultToNotion();
+      }
+    });
+
+    this.addCommand({
+      id: "sync-folder-with-notion",
+      name: "LLM Wiki Sync: Sync folder with Notion",
+      callback: () => {
+        this.openFolderSyncPicker();
+      }
+    });
+
+    this.addCommand({
+      id: "sync-entire-vault-with-notion",
+      name: "LLM Wiki Sync: Sync entire vault with Notion",
+      callback: () => {
+        void this.syncFolderWithNotion("");
       }
     });
 
@@ -265,6 +291,29 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     await this.saveSettings();
   }
 
+  getAllSyncBaselinePageIds(): string[] {
+    this.ensureSyncStateContainer();
+    return Object.keys(this.settings.syncStates);
+  }
+
+  getAllFolderMappings(): FolderMapping[] {
+    this.ensureSyncStateContainer();
+    return Object.values(this.settings.folderMappings)
+      .filter((mapping): mapping is FolderMapping => Boolean(
+        mapping &&
+        typeof mapping === "object" &&
+        typeof mapping.notionPageId === "string" &&
+        typeof mapping.lastKnownPath === "string" &&
+        typeof mapping.rootPageId === "string"
+      ));
+  }
+
+  async saveQuarantineRecord(record: QuarantineRecord): Promise<void> {
+    this.ensureSyncStateContainer();
+    this.settings.quarantineRecords[normalizeNotionPageId(record.notionPageId)] = record;
+    await this.saveSettings();
+  }
+
   private ensureSyncStateContainer(): void {
     if (this.settings.syncStateVersion !== SYNC_STATE_VERSION) {
       this.settings.syncStateVersion = SYNC_STATE_VERSION;
@@ -274,6 +323,9 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     }
     if (!this.settings.folderMappings || typeof this.settings.folderMappings !== "object") {
       this.settings.folderMappings = {};
+    }
+    if (!this.settings.quarantineRecords || typeof this.settings.quarantineRecords !== "object") {
+      this.settings.quarantineRecords = {};
     }
   }
 
@@ -382,7 +434,17 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       app: this.app,
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this
+      baselineStore: this,
+      resolveParentPageId: async (file) => {
+        const parent = await resolveNotionParentForFile({
+          app: this.app,
+          token: this.getNotionToken(),
+          rootPageUrl: this.settings.notionRootPageUrl,
+          store: this,
+          file
+        });
+        return parent?.parentPageId ?? null;
+      }
     });
   }
 
@@ -414,6 +476,20 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
       store: this
+    });
+  }
+
+  openFolderSyncPicker(): void {
+    new FolderSyncPickerModal(this).open();
+  }
+
+  async syncFolderWithNotion(folderPath: string): Promise<void> {
+    await syncFolderWithNotion({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      store: this,
+      folderPath
     });
   }
 
@@ -500,6 +576,30 @@ class PushEntireVaultModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+  }
+}
+
+class FolderSyncPickerModal extends FuzzySuggestModal<string> {
+  private plugin: LlmWikiSyncPlugin;
+  private folders: string[];
+
+  constructor(plugin: LlmWikiSyncPlugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.folders = getSelectableFolderPaths(plugin.app);
+    this.setPlaceholder("Choose a folder to sync with Notion");
+  }
+
+  getItems(): string[] {
+    return this.folders;
+  }
+
+  getItemText(folderPath: string): string {
+    return folderPath || "Vault root";
+  }
+
+  onChooseItem(folderPath: string): void {
+    void this.plugin.syncFolderWithNotion(folderPath);
   }
 }
 
@@ -620,10 +720,9 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync")
       .setHeading();
-    containerEl.createEl("p", { text: "Normal use: 1. Open a note 2. Click Sync current note 3. If a conflict appears, choose which version to keep." });
 
     new Setting(containerEl)
-      .setName("LLM Wiki Sync: Sync current note")
+      .setName("Sync current note")
       .setDesc("Use Sync current note for normal synchronization.")
       .addButton((button) => {
         button
@@ -639,19 +738,41 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Push current folder")
-      .setDesc("Push Markdown notes in the active note's folder and subfolders to Notion.")
+      .setName("Sync folder with Notion")
+      .setDesc("Choose a folder and reconcile its Markdown notes and Notion hierarchy.")
+      .addButton((button) => {
+        button
+          .setButtonText("Sync folder")
+          .onClick(() => {
+            this.plugin.openFolderSyncPicker();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Sync entire vault")
+      .setDesc("Reconcile all supported Markdown notes in this vault with Notion.")
+      .addButton((button) => {
+        button
+          .setButtonText("Sync entire vault")
+          .onClick(() => {
+            void this.plugin.syncFolderWithNotion("");
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Advanced")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Legacy bulk push")
+      .setDesc("One-way push tools remain available for testing.")
       .addButton((button) => {
         button
           .setButtonText("Push current folder")
           .onClick(() => {
             void this.plugin.pushCurrentFolderToNotion();
           });
-      });
-
-    new Setting(containerEl)
-      .setName("Push entire vault")
-      .setDesc("Push all supported Markdown notes in this vault to Notion after confirmation.")
+      })
       .addButton((button) => {
         button
           .setButtonText("Push entire vault")
@@ -695,10 +816,6 @@ class LlmWikiSyncSettingTab extends PluginSettingTab {
             void this.plugin.initializeWorkspaceMappings("entire-vault");
           });
       });
-
-    new Setting(containerEl)
-      .setName("Advanced")
-      .setHeading();
 
     new Setting(containerEl)
       .setName("Troubleshooting tools")

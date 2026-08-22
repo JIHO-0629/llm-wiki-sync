@@ -21,6 +21,7 @@ export interface PushCurrentNoteOptions {
   token: string;
   rootPageUrl: string;
   baselineStore: SyncBaselineStore;
+  resolveParentPageId?: (file: TFile) => Promise<string | null>;
 }
 
 export type PushFileStatus =
@@ -37,6 +38,7 @@ export interface PushFileResult {
   filePath: string;
   pageId?: string;
   message: string;
+  hierarchyMoved?: boolean;
   error?: unknown;
 }
 
@@ -46,6 +48,7 @@ export interface PushFileToNotionOptions {
   client: NotionClient;
   parentPageId: string | null;
   expectedParentPageId?: string | null;
+  repairMisplacedParent?: boolean;
   baselineStore: SyncBaselineStore;
   runId?: string;
 }
@@ -66,14 +69,18 @@ export async function pushCurrentNoteToNotion(options: PushCurrentNoteOptions): 
   }
 
   const client = new NotionClient({ token });
-  const parentPageId = extractNotionPageId(options.rootPageUrl);
-  console.debug("[LLM Wiki Sync][Root check] extracted root page id", parentPageId || "<invalid>");
+  let parentPageId = extractNotionPageId(options.rootPageUrl);
+  if (options.resolveParentPageId) {
+    parentPageId = await options.resolveParentPageId(activeFile);
+  }
+  console.debug("[LLM Wiki Sync][Root check] extracted parent page id", parentPageId || "<invalid>");
 
   const result = await pushFileToNotion({
     app: options.app,
     file: activeFile,
     client,
     parentPageId,
+    expectedParentPageId: parentPageId,
     baselineStore: options.baselineStore,
     runId
   });
@@ -137,6 +144,7 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
   console.debug(`${options.logPrefix} Mode: update`);
   console.debug(`${options.logPrefix} notion_page_id:`, options.pageId);
 
+  let hierarchyMoved = false;
   if (options.expectedParentPageId) {
     try {
       const pageDetails = await options.client.getPageDetails(options.pageId);
@@ -144,12 +152,17 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
         pageDetails.parentType !== "page_id" ||
         normalizePageId(pageDetails.parentPageId) !== normalizePageId(options.expectedParentPageId)
       ) {
-        return {
-          status: "misplaced",
-          filePath: options.file.path,
-          pageId: options.pageId,
-          message: `Notion page is under ${pageDetails.parentPageId || pageDetails.parentType || "unknown parent"} instead of ${options.expectedParentPageId}.`
-        };
+        if (options.repairMisplacedParent) {
+          await options.client.movePageToPage(options.pageId, options.expectedParentPageId);
+          hierarchyMoved = true;
+        } else {
+          return {
+            status: "misplaced",
+            filePath: options.file.path,
+            pageId: options.pageId,
+            message: `Notion page is under ${pageDetails.parentPageId || pageDetails.parentType || "unknown parent"} instead of ${options.expectedParentPageId}.`
+          };
+        }
       }
     } catch (error) {
       console.error(`${options.logPrefix} hierarchy parent check failed`, getErrorMessage(error));
@@ -186,7 +199,8 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
       status: "clean",
       filePath: options.file.path,
       pageId: options.pageId,
-      message: "Already in sync."
+      message: hierarchyMoved ? "Moved to the expected Notion folder. Already in sync." : "Already in sync.",
+      hierarchyMoved
     };
   }
   if (change.state === "REMOTE_ONLY_CHANGED") {
@@ -250,7 +264,8 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
       status: "updated",
       filePath: options.file.path,
       pageId: options.pageId,
-      message: "Updated Notion content and title."
+      message: hierarchyMoved ? "Moved to the expected Notion folder and updated Notion content and title." : "Updated Notion content and title.",
+      hierarchyMoved
     };
   } catch (error) {
     console.error(`${options.logPrefix} title update failed after content update`, getErrorMessage(error));

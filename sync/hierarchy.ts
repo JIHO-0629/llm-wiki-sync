@@ -17,7 +17,7 @@ import {
 } from "./bulkPush";
 import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
 
-export type HierarchyScope = "current-folder" | "entire-vault";
+export type HierarchyScope = "current-folder" | "entire-vault" | "folder";
 
 export type HierarchyStatus =
   | "MATCHED"
@@ -63,12 +63,19 @@ export interface MappingInitializationSummary {
   failed: number;
 }
 
+export interface HierarchyParentResult {
+  parentPageId: string;
+  foldersCreated: number;
+  folderMappingsRepaired: number;
+}
+
 export async function auditWorkspaceHierarchy(options: {
   app: App;
   token: string;
   rootPageUrl: string;
   store: BulkPushStore;
   scope: HierarchyScope;
+  folderPath?: string;
 }): Promise<HierarchyAuditResult | null> {
   const context = await createHierarchyContext(options);
   if (!context) {
@@ -84,6 +91,7 @@ export async function repairWorkspaceHierarchy(options: {
   rootPageUrl: string;
   store: BulkPushStore;
   scope: HierarchyScope;
+  folderPath?: string;
 }): Promise<HierarchyRepairSummary | null> {
   const context = await createHierarchyContext(options);
   if (!context) {
@@ -148,6 +156,7 @@ export async function initializeWorkspaceMappings(options: {
   rootPageUrl: string;
   store: BulkPushStore;
   scope: HierarchyScope;
+  folderPath?: string;
 }): Promise<MappingInitializationSummary | null> {
   const context = await createHierarchyContext(options);
   if (!context) {
@@ -208,6 +217,37 @@ export async function initializeWorkspaceMappings(options: {
   return summary;
 }
 
+export async function resolveNotionParentForFile(options: {
+  app: App;
+  token: string;
+  rootPageUrl: string;
+  store: BulkPushStore;
+  file: TFile;
+}): Promise<HierarchyParentResult | null> {
+  const context = await createHierarchyContext({
+    app: options.app,
+    token: options.token,
+    rootPageUrl: options.rootPageUrl,
+    store: options.store,
+    scope: "entire-vault"
+  });
+  if (!context) {
+    return null;
+  }
+
+  const counters = { foldersCreated: 0, folderMappingsRepaired: 0 };
+  const parentPageId = await getExpectedParentForFile(context, options.file, counters);
+  if (!parentPageId) {
+    return null;
+  }
+
+  return {
+    parentPageId,
+    foldersCreated: counters.foldersCreated,
+    folderMappingsRepaired: counters.folderMappingsRepaired
+  };
+}
+
 export class HierarchyAuditModal extends Modal {
   private readonly result: HierarchyAuditResult;
   private readonly onRepair?: () => void;
@@ -262,6 +302,7 @@ async function createHierarchyContext(options: {
   rootPageUrl: string;
   store: BulkPushStore;
   scope: HierarchyScope;
+  folderPath?: string;
 }): Promise<HierarchyContext | null> {
   const token = options.token.trim();
   if (!token) {
@@ -276,9 +317,11 @@ async function createHierarchyContext(options: {
   }
 
   const activeFile = options.app.workspace.getActiveFile();
-  const rootFolderPath = options.scope === "current-folder" && activeFile
-    ? getFolderPath(activeFile.path)
-    : "";
+  const rootFolderPath = options.scope === "folder"
+    ? normalizeVaultFolderPath(options.folderPath ?? "")
+    : options.scope === "current-folder" && activeFile
+      ? getFolderPath(activeFile.path)
+      : "";
   const files = selectBulkPushMarkdownFiles(options.app, rootFolderPath);
   const client = new NotionClient({ token });
   try {
@@ -396,13 +439,17 @@ async function auditNote(context: HierarchyContext, file: TFile): Promise<Hierar
   }
 }
 
-async function ensureHierarchyFolder(context: HierarchyContext, folderPath: string): Promise<{ action: "matched" | "created" | "repaired" | "skipped" | "failed"; pageId?: string }> {
+async function ensureHierarchyFolder(
+  context: HierarchyContext,
+  folderPath: string,
+  counters?: { foldersCreated: number; folderMappingsRepaired: number }
+): Promise<{ action: "matched" | "created" | "repaired" | "skipped" | "failed"; pageId?: string }> {
   const normalizedFolderPath = normalizeVaultFolderPath(folderPath);
   if (!normalizedFolderPath) {
     return { action: "matched", pageId: context.rootPageId };
   }
 
-  const parentPageId = await getExpectedParentForFolder(context, normalizedFolderPath);
+  const parentPageId = await getExpectedParentForFolder(context, normalizedFolderPath, counters);
   if (!parentPageId) {
     return { action: "failed" };
   }
@@ -413,6 +460,7 @@ async function ensureHierarchyFolder(context: HierarchyContext, folderPath: stri
     if (validation.status === "MATCHED") {
       if (context.store.getFolderMapping(mappingKey) === null) {
         await context.store.saveFolderMapping(mappingKey, mapping);
+        if (counters) counters.folderMappingsRepaired += 1;
         return { action: "repaired", pageId: mapping.notionPageId };
       }
       return { action: "matched", pageId: mapping.notionPageId };
@@ -429,6 +477,7 @@ async function ensureHierarchyFolder(context: HierarchyContext, folderPath: stri
       lastKnownPath: normalizedFolderPath,
       rootPageId: context.normalizedRootPageId
     });
+    if (counters) counters.folderMappingsRepaired += 1;
     return { action: "repaired", pageId: existing[0].id };
   }
 
@@ -444,6 +493,10 @@ async function ensureHierarchyFolder(context: HierarchyContext, folderPath: stri
       lastKnownPath: normalizedFolderPath,
       rootPageId: context.normalizedRootPageId
     });
+    if (counters) {
+      if (mapping) counters.folderMappingsRepaired += 1;
+      else counters.foldersCreated += 1;
+    }
     return { action: mapping ? "repaired" : "created", pageId: created.id };
   } catch (error) {
     console.error("[LLM Wiki Sync][Hierarchy] folder repair failed", normalizedFolderPath, getErrorMessage(error));
@@ -451,21 +504,29 @@ async function ensureHierarchyFolder(context: HierarchyContext, folderPath: stri
   }
 }
 
-async function getExpectedParentForFile(context: HierarchyContext, file: TFile): Promise<string | null> {
+async function getExpectedParentForFile(
+  context: HierarchyContext,
+  file: TFile,
+  counters?: { foldersCreated: number; folderMappingsRepaired: number }
+): Promise<string | null> {
   const folderPath = getFolderPath(file.path);
   if (!folderPath) {
     return context.rootPageId;
   }
-  const result = await ensureHierarchyFolder(context, folderPath);
+  const result = await ensureHierarchyFolder(context, folderPath, counters);
   return result.pageId ?? null;
 }
 
-async function getExpectedParentForFolder(context: HierarchyContext, folderPath: string): Promise<string | null> {
+async function getExpectedParentForFolder(
+  context: HierarchyContext,
+  folderPath: string,
+  counters?: { foldersCreated: number; folderMappingsRepaired: number }
+): Promise<string | null> {
   const parentFolderPath = getFolderPath(folderPath);
   if (!parentFolderPath) {
     return context.rootPageId;
   }
-  const result = await ensureHierarchyFolder(context, parentFolderPath);
+  const result = await ensureHierarchyFolder(context, parentFolderPath, counters);
   return result.pageId ?? null;
 }
 

@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
 
+console.debug = () => {};
+
 const require = createRequire(import.meta.url);
 const fallbackRoot = process.env.LLM_WIKI_SYNC_DEPS_ROOT ?? "";
 let esbuild;
@@ -20,6 +22,7 @@ const pages = new Map();
 const createRequests = [];
 const markdownPatches = [];
 const moveRequests = [];
+const forbiddenRequests = [];
 let nextPageId = 1;
 const ROOT_PAGE_ID = "11111111-1111-1111-1111-111111111111";
 const ROOT_B_PAGE_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -52,6 +55,11 @@ function normalizePath(input) {
 }
 
 async function requestUrl(request) {
+  if (request.method === "DELETE" || request.url.toLowerCase().includes("trash")) {
+    forbiddenRequests.push(request);
+    throw new Error(`Forbidden destructive request: ${request.method} ${request.url}`);
+  }
+
   if (request.method === "GET" && request.url.includes("/v1/pages/") && request.url.endsWith("/markdown")) {
     const pageId = decodeURIComponent(request.url.match(/\/v1\/pages\/([^/]+)\/markdown$/)[1]);
     const page = getPageOrThrow(pageId);
@@ -72,15 +80,20 @@ async function requestUrl(request) {
   if (request.method === "GET" && request.url.includes("/v1/blocks/") && request.url.includes("/children")) {
     const parentPageId = decodeURIComponent(request.url.match(/\/v1\/blocks\/([^/?]+)\/children/)[1]);
     getPageOrThrow(parentPageId);
-    const results = Array.from(pages.values())
-      .filter((page) => page.parentPageId === parentPageId && page.parentType === "page_id")
+    const url = new URL(request.url);
+    const pageSize = Number(url.searchParams.get("page_size") ?? "100");
+    const start = Number(url.searchParams.get("start_cursor") ?? "0");
+    const allResults = Array.from(pages.values())
+      .filter((page) => page.id !== parentPageId && page.parentPageId === parentPageId && page.parentType === "page_id")
       .map((page) => ({
         object: "block",
         id: page.id,
         type: "child_page",
         child_page: { title: page.title }
       }));
-    return ok({ object: "list", results, has_more: false, next_cursor: null });
+    const results = allResults.slice(start, start + pageSize);
+    const nextCursor = start + pageSize < allResults.length ? String(start + pageSize) : null;
+    return ok({ object: "list", results, has_more: nextCursor !== null, next_cursor: nextCursor });
   }
 
   if (request.method === "POST" && request.url.endsWith("/v1/pages")) {
@@ -205,7 +218,8 @@ function loadModule(entryPoint) {
 
 const { pushEntireVaultToNotion, selectBulkPushMarkdownFiles } = loadModule("sync/bulkPush.ts");
 const { pushCurrentNoteToNotion } = loadModule("sync/push.ts");
-const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMappings } = loadModule("sync/hierarchy.ts");
+const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMappings, resolveNotionParentForFile } = loadModule("sync/hierarchy.ts");
+const { syncFolderWithNotion } = loadModule("sync/folderSync.ts");
 
 function makeFile(filePath, content) {
   const extension = filePath.includes(".") ? filePath.split(".").pop() : "";
@@ -272,6 +286,7 @@ function makeStore() {
   return {
     baselines: {},
     folderMappings: {},
+    quarantineRecords: {},
     getSyncBaseline(pageId) {
       return this.baselines[normalizePageId(pageId)] ?? null;
     },
@@ -283,6 +298,15 @@ function makeStore() {
     },
     async saveFolderMapping(mappingKey, mapping) {
       this.folderMappings[mappingKey] = mapping;
+    },
+    getAllSyncBaselinePageIds() {
+      return Object.keys(this.baselines);
+    },
+    getAllFolderMappings() {
+      return Object.values(this.folderMappings);
+    },
+    async saveQuarantineRecord(record) {
+      this.quarantineRecords[normalizePageId(record.notionPageId)] = record;
     }
   };
 }
@@ -340,6 +364,7 @@ notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
 moveRequests.length = 0;
+forbiddenRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 addPage("clean-page", "Clean", "clean\n");
@@ -472,6 +497,7 @@ notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
 moveRequests.length = 0;
+forbiddenRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 addPage("test-folder", "test", "", ROOT_PAGE_ID);
@@ -574,6 +600,63 @@ notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
 moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("linked-root-page", "시험", "linked body\n", ROOT_PAGE_ID);
+addPage("old-synced-page", "Old synced", "old\n", ROOT_PAGE_ID);
+addPage("unknown-remote-page", "Unknown remote", "unknown\n", ROOT_PAGE_ID);
+addPage("duplicate-linked-page", "Duplicate linked", "dup\n", ROOT_PAGE_ID);
+for (let index = 0; index < 105; index += 1) {
+  addPage(`unknown-page-${index}`, `Unknown ${index}`, "unknown\n", ROOT_PAGE_ID);
+}
+const folderSyncFiles = [
+  makeFile("test/시험의 시험/시험.md", "---\nnotion_page_id: \"linked-root-page\"\n---\n\nlinked body\n"),
+  makeFile("test/시험의 시험/제발 되라.md", "please\n"),
+  makeFile("test/시험의 시험의 시험/반갑습니다.md", "hello\n"),
+  makeFile("test/Duplicate A.md", "---\nnotion_page_id: \"duplicate-linked-page\"\n---\n\ndup\n"),
+  makeFile("test/Duplicate B.md", "---\nnotion_page_id: \"duplicate-linked-page\"\n---\n\ndup\n"),
+  makeFile("LLM Wiki Sync Review/Skip.md", "skip\n")
+];
+const folderSyncApp = createApp(folderSyncFiles, null);
+const folderSyncStore = makeStore();
+folderSyncStore.baselines[normalizePageId("linked-root-page")] = makeBaseline("linked-root-page", "시험", "\nlinked body\n", "시험", "linked body\n");
+folderSyncStore.baselines[normalizePageId("old-synced-page")] = makeBaseline("old-synced-page", "Old synced", "\nold\n", "Old synced", "old\n");
+folderSyncStore.baselines[normalizePageId("duplicate-linked-page")] = makeBaseline("duplicate-linked-page", "Duplicate linked", "\ndup\n", "Duplicate linked", "dup\n");
+const folderSyncSummary = await syncFolderWithNotion({
+  app: folderSyncApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: folderSyncStore,
+  folderPath: "test"
+});
+assert.ok(folderSyncSummary);
+const syncedTestFolder = createRequests.find((request) => request.title === "test" && request.parentPageId === ROOT_PAGE_ID);
+assert.ok(syncedTestFolder);
+const syncedNestedFolder = createRequests.find((request) => request.title === "시험의 시험" && request.parentPageId === folderSyncStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test")].notionPageId);
+assert.ok(syncedNestedFolder);
+assert.equal(pages.get("linked-root-page").parentPageId, folderSyncStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험")].notionPageId);
+assert.equal(createRequests.filter((request) => request.title === "시험").length, 0);
+assert.ok(createRequests.some((request) => request.title === "제발 되라" && request.parentPageId === folderSyncStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험")].notionPageId));
+assert.ok(createRequests.some((request) => request.title === "반갑습니다" && request.parentPageId === folderSyncStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test/시험의 시험의 시험")].notionPageId));
+assert.equal(markdownPatches.some((patch) => patch.pageId === "duplicate-linked-page"), false);
+assert.equal(pages.get("unknown-remote-page").parentPageId, ROOT_PAGE_ID);
+assert.ok(folderSyncSummary.remoteNew >= 106);
+const reviewPage = Array.from(pages.values()).find((page) => page.title === "LLM Wiki Sync Review" && page.parentPageId === ROOT_PAGE_ID);
+assert.ok(reviewPage);
+const obsidianMissingPage = Array.from(pages.values()).find((page) => page.title === "Obsidian missing" && page.parentPageId === reviewPage.id);
+assert.ok(obsidianMissingPage);
+assert.equal(pages.get("old-synced-page").parentPageId, obsidianMissingPage.id);
+assert.ok(folderSyncStore.quarantineRecords[normalizePageId("old-synced-page")]);
+assert.equal(folderSyncStore.quarantineRecords[normalizePageId("old-synced-page")].previousParentPageId, ROOT_PAGE_ID);
+assert.equal(forbiddenRequests.length, 0);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
 const singleFile = makeFile("Single.md", "single\n");
@@ -587,5 +670,39 @@ await pushCurrentNoteToNotion({
 });
 assert.equal(notices.at(-1), "LLM Wiki Sync: Pushed and linked to Notion.");
 assert.ok(singleFile.content.includes("notion_page_id"));
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+const nestedSingleFile = makeFile("Area/Sub/Single.md", "single nested\n");
+const nestedSingleApp = createApp([nestedSingleFile], "Area/Sub/Single.md");
+const nestedSingleStore = makeStore();
+await pushCurrentNoteToNotion({
+  app: nestedSingleApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: nestedSingleStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: nestedSingleApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: nestedSingleStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+const areaFolder = createRequests.find((request) => request.title === "Area" && request.parentPageId === ROOT_PAGE_ID);
+assert.ok(areaFolder);
+const subFolder = createRequests.find((request) => request.title === "Sub" && request.parentPageId === nestedSingleStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area")].notionPageId);
+assert.ok(subFolder);
+const nestedSingleCreate = createRequests.find((request) => request.title === "Single");
+assert.equal(nestedSingleCreate.parentPageId, nestedSingleStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
 
 console.log("bulk push checks passed");

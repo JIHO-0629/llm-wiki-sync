@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+- Added a safe `Sync folder with Notion` workflow that reconciles Obsidian folders and linked Notion page parents before syncing note content.
+- Added a folder picker so folder sync can run without relying on the active note.
+- Made single-note Push create new pages under the matching Notion folder hierarchy instead of always using the configured root page directly.
+- Added hierarchy-aware linked-page movement for the folder sync workflow while preserving `notion_page_id` and sync baselines.
+- Added conservative Review quarantine records for previously synced Notion pages that remain missing from the selected Obsidian scope after a second validation pass.
+- Kept ambiguous remote/local identity cases read-only and reported instead of guessing or deleting.
+- Added folder sync regression coverage for nested hierarchy, linked page moves, single-note parent resolution, Review behavior, duplicate mapping safety, and large workloads.
+
 ## 0.8.0
 
 - Added safe bulk push from Obsidian to Notion for the current folder or entire vault.

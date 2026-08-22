@@ -13,9 +13,9 @@ LLM Wiki Sync is an Obsidian desktop plugin for manual, safety-first synchroniza
 - Body synchronization
 - Title and filename synchronization
 - `Sync current note` automatic direction detection
-- Push current folder to Notion
-- Push entire vault to Notion
-- Obsidian folder hierarchy export to Notion pages
+- Sync folder with Notion using a folder picker
+- Sync entire vault with Notion
+- Obsidian folder hierarchy reconciliation to Notion pages
 - Persisted synchronization baseline
 - Conflict detection
 - Explicit `Keep Obsidian` and `Keep Notion` resolution
@@ -40,7 +40,7 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-LLM Wiki Sync v0.8.0 is a development branch for review.
+LLM Wiki Sync v0.8.1 is a development branch for review.
 
 For manual installation or release-candidate testing, place the plugin folder at:
 
@@ -72,11 +72,29 @@ For old notes that already have `notion_page_id` but no v0.6 baseline, run `Init
 
 1. Open an Obsidian note.
 2. Click `Sync current note`.
-3. If a conflict appears, choose which version to keep:
+3. Use `Sync folder with Notion` to choose a folder and reconcile that folder with Notion.
+4. Use `Sync entire vault` to reconcile the vault root.
+5. If a conflict appears, choose which version to keep:
    - `Keep Obsidian`
    - `Keep Notion`
 
-Unlinked local notes are created as child pages under the configured Notion root page. Linked notes sync in the safe direction determined by the baseline state.
+Unlinked local notes are created under the matching Notion folder hierarchy. Linked notes sync in the safe direction determined by the baseline state.
+
+## Folder Sync
+
+Use `Sync folder with Notion` to choose the vault root or any nested folder. The selected folder and its subfolders become the sync scope.
+
+Folder sync performs a conservative reconciliation workflow:
+
+- Scans the local Obsidian Markdown tree.
+- Scans the matching Notion tree recursively.
+- Validates folder mappings and linked note parents.
+- Creates missing Notion folder pages.
+- Moves valid linked Notion pages to the expected folder parent when the target is unambiguous.
+- Creates or updates notes using the existing baseline conflict model.
+- Re-fetches Notion hierarchy before making any Review decision.
+
+It does not delete Obsidian files, trash Notion pages, or automatically resolve conflicts. Ambiguous identity cases are reported and skipped.
 
 ## Bulk Push
 
@@ -94,6 +112,10 @@ Bulk push keeps the same baseline conflict protection as single-note push:
 
 Folder-to-Notion page mappings are stored in plugin data, not in Markdown frontmatter. They are scoped to the configured Notion root page, so changing the root page creates or reuses a separate folder hierarchy. The vault root maps to the configured Notion root page and does not create an extra folder page.
 
+## Review Area
+
+Folder sync may create `LLM Wiki Sync Review` under the configured Notion root. A previously synced Notion page is moved to `LLM Wiki Sync Review/Obsidian missing` only when it has a sync baseline, has no local mapped note in the selected scope after mutation re-validation, and is not ambiguous. Unknown remote-only pages are reported, not moved.
+
 ## Conflict Handling
 
 The plugin does not automatically merge or choose the newest version. If both Obsidian and Notion changed since the last baseline, sync is blocked.
@@ -110,8 +132,14 @@ After a successful resolution, the baseline is refreshed and the state returns t
 Advanced commands remain available from the command palette:
 
 - `Push to Notion`
+- `LLM Wiki Sync: Sync folder with Notion`
+- `LLM Wiki Sync: Sync entire vault with Notion`
 - `LLM Wiki Sync: Push current folder to Notion`
 - `LLM Wiki Sync: Push entire vault to Notion`
+- `LLM Wiki Sync: Audit current folder hierarchy`
+- `LLM Wiki Sync: Audit entire vault hierarchy`
+- `LLM Wiki Sync: Initialize current folder mappings`
+- `LLM Wiki Sync: Initialize entire vault mappings`
 - `Pull from Notion`
 - `Initialize sync baseline`
 - `Debug active mapping`
@@ -137,10 +165,10 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 ## Known Limitations
 
 - Sync is manual, not background or real-time.
-- The normal workflow targets direct pages under the configured root page.
-- v0.8.0 bulk hierarchy support is Obsidian -> Notion only.
+- v0.8.1 folder sync focuses on safe Obsidian-to-Notion hierarchy reconciliation plus baseline-protected note sync.
 - Pull remains limited to its existing direct-child behavior and does not recreate recursive Notion hierarchy locally.
 - Folder rename identity recovery is limited; a renamed folder with no stored mapping may be treated as a new folder.
+- There is no standalone page numbering system in this repository; `notion_page_id` and sync baselines remain the identity mechanisms.
 - Images and attachments are not synchronized.
 - Notion database/data-source synchronization is not supported.
 - Standalone `.yaml` and `.yml` files are not synchronized; Obsidian YAML frontmatter in Markdown notes is preserved for local mapping metadata.
@@ -152,9 +180,9 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 
 The Notion token is stored through Obsidian SecretStorage when available. It is not stored in plugin `data.json`.
 
-The plugin sends requests to the Notion API only when the user runs connection testing, sync, pull, push, bulk push, baseline initialization, debug lookup, or conflict resolution commands. It does not use analytics or telemetry.
+The plugin sends requests to the Notion API only when the user runs connection testing, sync, folder sync, pull, push, bulk push, baseline initialization, debug lookup, or conflict resolution commands. It does not use analytics or telemetry.
 
-Plugin `data.json` may contain Notion page IDs, folder mappings, root page configuration, sync baselines, and fingerprints. Do not publish user-specific plugin data.
+Plugin `data.json` may contain Notion page IDs, folder mappings, root page configuration, sync baselines, Review quarantine records, and fingerprints. Do not publish user-specific plugin data.
 
 ## Development / Build
 
@@ -168,7 +196,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.8.0
+0.8.1
 
 ## License
 
