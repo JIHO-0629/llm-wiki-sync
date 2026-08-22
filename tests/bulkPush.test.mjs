@@ -708,6 +708,77 @@ moveRequests.length = 0;
 forbiddenRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
+addPage("test-folder", "test", "", ROOT_PAGE_ID);
+addPage("notion-a", "A", "remote\n", "test-folder");
+addPage("notion-b1", "B", "remote b1\n", "test-folder");
+addPage("notion-b2", "B", "remote b2\n", "test-folder");
+addPage("true-orphan", "Deleted", "deleted\n", "test-folder");
+const mappingLostFiles = [
+  makeFile("test/A.md", "local\n"),
+  makeFile("test/B.md", "local b\n")
+];
+const mappingLostApp = createApp(mappingLostFiles, null);
+const mappingLostStore = makeStore();
+mappingLostStore.folderMappings[mappingKey(ROOT_PAGE_ID, "test")] = {
+  notionPageId: "test-folder",
+  lastKnownPath: "test",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+mappingLostStore.baselines[normalizePageId("notion-a")] = makeBaseline("notion-a", "A", "\nold\n", "A", "remote\n");
+mappingLostStore.baselines[normalizePageId("notion-b1")] = makeBaseline("notion-b1", "B", "\nold b\n", "B", "remote b1\n");
+mappingLostStore.baselines[normalizePageId("true-orphan")] = makeBaseline("true-orphan", "Deleted", "\ndeleted\n", "Deleted", "deleted\n");
+mappingLostStore.managedPageRecords[normalizePageId("notion-a")] = {
+  notionPageId: "notion-a",
+  rootPageId: normalizePageId(ROOT_PAGE_ID),
+  lastKnownObsidianPath: "test/A.md",
+  lastKnownParentPageId: "test-folder",
+  updatedAt: "2026-08-22T00:00:00.000Z"
+};
+mappingLostStore.managedPageRecords[normalizePageId("notion-b1")] = {
+  notionPageId: "notion-b1",
+  rootPageId: normalizePageId(ROOT_PAGE_ID),
+  lastKnownObsidianPath: "test/B.md",
+  lastKnownParentPageId: "test-folder",
+  updatedAt: "2026-08-22T00:00:00.000Z"
+};
+mappingLostStore.managedPageRecords[normalizePageId("true-orphan")] = {
+  notionPageId: "true-orphan",
+  rootPageId: normalizePageId(ROOT_PAGE_ID),
+  lastKnownObsidianPath: "test/Deleted.md",
+  lastKnownParentPageId: "test-folder",
+  updatedAt: "2026-08-22T00:00:00.000Z"
+};
+const mappingLostSummary = await syncFolderWithNotion({
+  app: mappingLostApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: mappingLostStore,
+  folderPath: "test"
+});
+assert.ok(mappingLostSummary);
+assert.equal(pages.get("notion-a").parentPageId, "test-folder");
+assert.equal(pages.get("notion-b1").parentPageId, "test-folder");
+assert.equal(mappingLostFiles[0].content, "local\n");
+assert.equal(mappingLostFiles[1].content, "local b\n");
+assert.equal(markdownPatches.length, 0);
+assert.equal(mappingLostSummary.details.some((detail) => detail.startsWith("MAPPING_LOST test/A.md")), true);
+assert.equal(mappingLostSummary.details.some((detail) => detail.startsWith("MAPPING_LOST test/B.md")), true);
+const mappingLostReview = Array.from(pages.values()).find((page) => page.title === "LLM Wiki Sync Review" && page.parentPageId === ROOT_PAGE_ID);
+assert.ok(mappingLostReview);
+const mappingLostMissing = Array.from(pages.values()).find((page) => page.title === "Obsidian missing" && page.parentPageId === mappingLostReview.id);
+assert.ok(mappingLostMissing);
+assert.equal(pages.get("true-orphan").parentPageId, mappingLostMissing.id);
+assert.equal(mappingLostSummary.movedToReview, 1);
+assert.equal(forbiddenRequests.length, 0);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
 const singleFile = makeFile("Single.md", "single\n");
 const singleApp = createApp([singleFile], "Single.md");
 const singleStore = makeStore();
@@ -784,6 +855,141 @@ await syncCurrentNote({
 const syncCurrentCreate = createRequests.find((request) => request.title === "Current");
 assert.ok(syncCurrentCreate);
 assert.equal(syncCurrentCreate.parentPageId, syncCurrentNestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("linked-clean-page", "Linked", "\nbody\n", ROOT_PAGE_ID);
+const linkedCleanFile = makeFile("Area/Sub/Linked.md", "---\nnotion_page_id: \"linked-clean-page\"\n---\n\nbody\n");
+const linkedCleanApp = createApp([linkedCleanFile], "Area/Sub/Linked.md");
+const linkedCleanStore = makeStore();
+linkedCleanStore.baselines[normalizePageId("linked-clean-page")] = makeBaseline("linked-clean-page", "Linked", "\nbody\n", "Linked", "\nbody\n");
+await syncCurrentNote({
+  app: linkedCleanApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: linkedCleanStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: linkedCleanApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: linkedCleanStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+assert.equal(pages.get("linked-clean-page").parentPageId, linkedCleanStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
+assert.equal(moveRequests.some((request) => request.pageId === "linked-clean-page"), true);
+assert.equal(markdownPatches.length, 0);
+assert.equal(notices.at(-1), "LLM Wiki Sync: Moved to matching Notion folder. Content already in sync.");
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("linked-local-page", "Linked local", "\nold\n", ROOT_PAGE_ID);
+const linkedLocalFile = makeFile("Area/Sub/Linked local.md", "---\nnotion_page_id: \"linked-local-page\"\n---\n\nnew\n");
+const linkedLocalApp = createApp([linkedLocalFile], "Area/Sub/Linked local.md");
+const linkedLocalStore = makeStore();
+linkedLocalStore.baselines[normalizePageId("linked-local-page")] = makeBaseline("linked-local-page", "Linked local", "\nold\n", "Linked local", "\nold\n");
+await syncCurrentNote({
+  app: linkedLocalApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: linkedLocalStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: linkedLocalApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: linkedLocalStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+assert.equal(pages.get("linked-local-page").parentPageId, linkedLocalStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
+assert.equal(markdownPatches.some((patch) => patch.pageId === "linked-local-page" && patch.markdown === "\nnew\n"), true);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("linked-conflict-page", "Linked conflict", "\nremote\n", ROOT_PAGE_ID);
+const linkedConflictFile = makeFile("Area/Sub/Linked conflict.md", "---\nnotion_page_id: \"linked-conflict-page\"\n---\n\nlocal\n");
+const linkedConflictApp = createApp([linkedConflictFile], "Area/Sub/Linked conflict.md");
+const linkedConflictStore = makeStore();
+linkedConflictStore.baselines[normalizePageId("linked-conflict-page")] = makeBaseline("linked-conflict-page", "Linked conflict", "\nold\n", "Linked conflict", "\nold\n");
+await syncCurrentNote({
+  app: linkedConflictApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: linkedConflictStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: linkedConflictApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: linkedConflictStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+assert.equal(pages.get("linked-conflict-page").parentPageId, linkedConflictStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Area/Sub")].notionPageId);
+assert.equal(markdownPatches.length, 0);
+assert.equal(notices.at(-1), "LLM Wiki Sync: Conflict detected. Choose which version to keep.");
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("linked-duplicate-page", "Linked duplicate", "\nbody\n", ROOT_PAGE_ID);
+const linkedDuplicateFiles = [
+  makeFile("Area/Sub/Linked duplicate.md", "---\nnotion_page_id: \"linked-duplicate-page\"\n---\n\nbody\n"),
+  makeFile("Other duplicate.md", "---\nnotion_page_id: \"linked-duplicate-page\"\n---\n\nbody\n")
+];
+const linkedDuplicateApp = createApp(linkedDuplicateFiles, "Area/Sub/Linked duplicate.md");
+const linkedDuplicateStore = makeStore();
+linkedDuplicateStore.baselines[normalizePageId("linked-duplicate-page")] = makeBaseline("linked-duplicate-page", "Linked duplicate", "\nbody\n", "Linked duplicate", "\nbody\n");
+await syncCurrentNote({
+  app: linkedDuplicateApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  baselineStore: linkedDuplicateStore,
+  resolveParentPageId: async (file) => {
+    const parent = await resolveNotionParentForFile({
+      app: linkedDuplicateApp,
+      token: "secret_test",
+      rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+      store: linkedDuplicateStore,
+      file
+    });
+    return parent?.parentPageId ?? null;
+  }
+});
+assert.equal(pages.get("linked-duplicate-page").parentPageId, ROOT_PAGE_ID);
+assert.equal(moveRequests.length, 0);
+assert.equal(markdownPatches.length, 0);
 
 pages.clear();
 notices.length = 0;

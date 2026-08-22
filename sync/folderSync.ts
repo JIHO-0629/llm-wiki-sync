@@ -97,6 +97,7 @@ export async function syncFolderWithNotion(options: {
   const files = selectBulkPushMarkdownFiles(options.app, scopePath);
   const client = new NotionClient({ token });
   const summary = createSummary(scopePath);
+  const protectedFromQuarantinePageIds = new Set<string>();
 
   try {
     await client.getPageDetails(rootPageId);
@@ -165,6 +166,9 @@ export async function syncFolderWithNotion(options: {
       baselineStore: options.store
     });
     applyPushResult(summary, result);
+    if (result.status === "ambiguous" && result.pageId) {
+      protectedFromQuarantinePageIds.add(normalizeNotionPageId(result.pageId));
+    }
     if (isSuccessfulSyncResult(result) && result.pageId) {
       await options.store.saveManagedPageRecord({
         notionPageId: result.pageId,
@@ -184,6 +188,7 @@ export async function syncFolderWithNotion(options: {
     rootPageId,
     scopePath,
     localFiles: files,
+    protectedFromQuarantinePageIds,
     firstSnapshot,
     secondSnapshot,
     summary
@@ -227,6 +232,7 @@ async function quarantineVerifiedOrphans(options: {
   rootPageId: string;
   scopePath: string;
   localFiles: TFile[];
+  protectedFromQuarantinePageIds: Set<string>;
   firstSnapshot: RemoteTreePage[];
   secondSnapshot: RemoteTreePage[];
   summary: FolderSyncSummary;
@@ -265,6 +271,18 @@ async function quarantineVerifiedOrphans(options: {
       options.summary.legacyUnscoped += 1;
       options.summary.ambiguous += 1;
       options.summary.details.push(`LEGACY_UNSCOPED ${page.path} - no selected-folder Obsidian path evidence; Review move skipped`);
+      continue;
+    }
+
+    if (findSelectedLocalFileByPath(options.localFiles, managedRecord.lastKnownObsidianPath)) {
+      options.summary.ambiguous += 1;
+      options.summary.details.push(`MAPPING_LOST ${managedRecord.lastKnownObsidianPath} - local file still exists but notion_page_id mapping is missing or ambiguous; Review move skipped`);
+      continue;
+    }
+
+    if (options.protectedFromQuarantinePageIds.has(normalizedPageId)) {
+      options.summary.ambiguous += 1;
+      options.summary.details.push(`AMBIGUOUS ${page.path} - protected from Review after ambiguous local reconciliation`);
       continue;
     }
 
@@ -436,6 +454,11 @@ function isPathInScope(path: string, scopePath: string): boolean {
     return !isSystemObsidianPath(normalizedPath);
   }
   return normalizedPath === normalizedScope || normalizedPath.startsWith(`${normalizedScope}/`);
+}
+
+function findSelectedLocalFileByPath(files: TFile[], path: string): TFile | null {
+  const normalizedPath = normalizePath(path);
+  return files.find((file) => normalizePath(file.path) === normalizedPath) ?? null;
 }
 
 function isSystemObsidianPath(path: string): boolean {
