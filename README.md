@@ -37,7 +37,7 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-LLM Wiki Sync v0.7.0 is prepared as an Obsidian Community Plugin submission candidate.
+LLM Wiki Sync v0.7.1 is prepared as an Obsidian Community Plugin submission candidate.
 
 For manual installation or release-candidate testing, place the plugin folder at:
 
@@ -143,7 +143,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.7.0
+0.7.1
 
 ## License
 

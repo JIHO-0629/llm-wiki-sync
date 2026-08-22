@@ -1,9 +1,9 @@
 {
   "id": "llm-wiki-sync",
   "name": "LLM Wiki Sync",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "minAppVersion": "1.11.4",
-  "description": "Bidirectional Obsidian and Notion synchronization with explicit conflict protection.",
+  "description": "Sync Markdown notes with Notion bidirectionally with explicit conflict protection.",
   "author": "JIHO-0629",
   "isDesktopOnly": true
 }

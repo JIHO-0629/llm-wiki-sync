@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- Updated the plugin manifest description to satisfy Obsidian Community automated review.
+- Bumped release metadata from 0.7.0 to 0.7.1.
+
 ## 0.7.0
 
 - Fixed new Notion page creation for Markdown documents with more than 100 blocks/sections.
