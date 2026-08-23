@@ -66,7 +66,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.2";
+const VERSION_LABEL = "v0.8.4";
 
 interface SyncRunState {
   type: string | null;
@@ -89,7 +89,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.2 loaded");
+    console.debug("[LLM Wiki Sync] v0.8.4 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
@@ -185,7 +185,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "pull-pages-from-notion",
       name: "Pull from Notion",
       callback: () => {
-        void this.pullPagesFromNotion();
+        void this.runExclusiveSync("pull-pages-from-notion", "Notion Pull", () => this.pullPagesFromNotion());
       }
     });
 
@@ -299,6 +299,12 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async saveFolderMapping(mappingKey: string, mapping: FolderMapping): Promise<void> {
     this.ensureSyncStateContainer();
     this.settings.folderMappings[mappingKey] = mapping;
+    await this.saveSettings();
+  }
+
+  async removeFolderMapping(mappingKey: string): Promise<void> {
+    this.ensureSyncStateContainer();
+    delete this.settings.folderMappings[mappingKey];
     await this.saveSettings();
   }
 
@@ -502,7 +508,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       app: this.app,
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this
+      baselineStore: this,
+      store: this
     });
   }
 
@@ -1083,3 +1090,4 @@ function getErrorMessage(error: unknown): string {
 
   return String(error);
 }
+

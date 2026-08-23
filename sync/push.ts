@@ -14,7 +14,7 @@ import {
   logConflictState,
   type SyncBaselineStore
 } from "./baseline";
-import { findFilesMappedToPage, getNotionPageMapping, removeNotionPageMappingFromMarkdown, setNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, removeNotionPageMappingFromMarkdown, setNotionPageMapping } from "./mapping";
 
 export interface PushCurrentNoteOptions {
   app: App;
@@ -68,6 +68,10 @@ export async function pushCurrentNoteToNotion(options: PushCurrentNoteOptions): 
     new Notice("LLM Wiki Sync: Notion API token is missing");
     return;
   }
+  if (await isContainerIndexFile(options.app, activeFile)) {
+    new Notice("LLM Wiki Sync: Container index files are excluded from normal Push.");
+    return;
+  }
 
   const client = new NotionClient({ token });
   let parentPageId = extractNotionPageId(options.rootPageUrl);
@@ -104,6 +108,9 @@ export async function pushFileToNotion(options: PushFileToNotionOptions): Promis
   }
 
   const existingMapping = await getNotionPageMapping(options.app, options.file);
+  if (existingMapping.hasMapping && await isContainerIndexFile(options.app, options.file)) {
+    return fail(options.file, "Container index files are excluded from normal Push and Folder Sync.", existingMapping.pageId ?? undefined);
+  }
   const markdown = await options.app.vault.read(options.file);
   const markdownBody = removeNotionPageMappingFromMarkdown(markdown);
 

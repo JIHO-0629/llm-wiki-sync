@@ -8,7 +8,7 @@ import {
   logConflictState,
   type SyncBaselineStore
 } from "./baseline";
-import { findFilesMappedToPage, getNotionPageMapping, normalizePulledMarkdown, replaceMarkdownBodyPreservingFrontmatter } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, normalizePulledMarkdown, replaceMarkdownBodyPreservingFrontmatter } from "./mapping";
 import { pushCurrentNoteToNotion } from "./push";
 import { renameMappedFileAfterPull } from "./pull";
 import { resolveConflict } from "./resolveConflict";
@@ -51,6 +51,10 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
   }
   if (!mapping.pageId) {
     new Notice("LLM Wiki Sync: Push failed - notion_page_id is empty");
+    return;
+  }
+  if (await isContainerIndexFile(options.app, file)) {
+    new Notice("LLM Wiki Sync: Container index files are excluded from normal note sync.");
     return;
   }
   console.debug(`${logPrefix} notion_page_id:`, mapping.pageId);

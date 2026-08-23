@@ -13,11 +13,12 @@ import {
   repairWorkspaceHierarchy,
   resolveNotionParentForFile
 } from "./hierarchy";
-import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile } from "./mapping";
 import { pushFileToNotion, type PushFileResult } from "./push";
+import { REVIEW_FOLDER_TITLE, isReviewPath, scanRemoteTree, type RemoteTreePage } from "./remoteTree";
 import { CachedNotionClient, createSyncRunCache } from "./runCache";
 
-export const REVIEW_FOLDER_TITLE = "LLM Wiki Sync Review";
+export { REVIEW_FOLDER_TITLE };
 export const REVIEW_OBSIDIAN_MISSING_TITLE = "Obsidian missing";
 export const REVIEW_AMBIGUOUS_TITLE = "Ambiguous";
 
@@ -95,13 +96,6 @@ export interface SyncProgress {
 
 export interface SyncCancelToken {
   cancelRequested: boolean;
-}
-
-interface RemoteTreePage {
-  id: string;
-  title: string;
-  parentPageId: string;
-  path: string;
 }
 
 const SYSTEM_OBSIDIAN_FOLDERS = new Set([".obsidian", "LLM Wiki Sync Pull", "LLM Wiki Sync Review"]);
@@ -258,6 +252,12 @@ export async function syncFolderWithNotion(options: {
   });
   for (const file of files) {
     if (shouldCancel(options.cancelToken, summary, finish)) return summary;
+    if (await isContainerIndexFile(options.app, file)) {
+      summary.failed += 1;
+      summary.processed += 1;
+      summary.details.push(`SKIPPED ${file.path} - container index files are excluded from normal Folder Sync`);
+      continue;
+    }
     emitProgress({
       phase: "note_sync",
       phaseIndex: 4,
@@ -507,35 +507,6 @@ async function ensureChildPageByTitle(client: NotionClient, parentPageId: string
   return created.id;
 }
 
-async function scanRemoteTree(client: NotionClient, rootPageId: string): Promise<RemoteTreePage[]> {
-  const pages: RemoteTreePage[] = [];
-  await scanRemoteChildren(client, rootPageId, "", pages, new Set([normalizeNotionPageId(rootPageId)]));
-  return pages;
-}
-
-async function scanRemoteChildren(
-  client: NotionClient,
-  parentPageId: string,
-  parentPath: string,
-  pages: RemoteTreePage[],
-  visitedPageIds: Set<string>
-): Promise<void> {
-  const children = await client.listChildPages(parentPageId, "Hierarchy");
-  for (const child of children) {
-    const normalizedChildId = normalizeNotionPageId(child.id);
-    if (visitedPageIds.has(normalizedChildId)) {
-      continue;
-    }
-    visitedPageIds.add(normalizedChildId);
-    const path = parentPath ? `${parentPath}/${child.title}` : child.title;
-    const page = { id: child.id, title: child.title, parentPageId, path };
-    pages.push(page);
-    if (!isReviewPath(path)) {
-      await scanRemoteChildren(client, child.id, path, pages, visitedPageIds);
-    }
-  }
-}
-
 export function getSelectableFolderPaths(app: App): string[] {
   const folders = new Set<string>([""]);
   for (const file of app.vault.getMarkdownFiles()) {
@@ -650,10 +621,6 @@ function formatDuration(durationMs: number): string {
     return `${seconds}s`;
   }
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
-
-function isReviewPath(path: string): boolean {
-  return path === REVIEW_FOLDER_TITLE || path.startsWith(`${REVIEW_FOLDER_TITLE}/`);
 }
 
 function isPathInScope(path: string, scopePath: string): boolean {

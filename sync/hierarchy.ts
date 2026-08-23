@@ -15,7 +15,7 @@ import {
   type BulkPushStore,
   type FolderMapping
 } from "./bulkPush";
-import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile } from "./mapping";
 import type { SyncRunCache } from "./runCache";
 
 export type HierarchyScope = "current-folder" | "entire-vault" | "folder";
@@ -342,7 +342,7 @@ async function createHierarchyContext(options: {
     : options.scope === "current-folder" && activeFile
       ? getFolderPath(activeFile.path)
       : "";
-  const files = selectBulkPushMarkdownFiles(options.app, rootFolderPath);
+  const files = await selectHierarchyMarkdownFiles(options.app, rootFolderPath);
   const client = options.client ?? new NotionClient({ token });
   try {
     await client.getPageDetails(rootPageId);
@@ -361,6 +361,16 @@ async function createHierarchyContext(options: {
     scope: options.scope,
     runCache: options.runCache
   };
+}
+
+async function selectHierarchyMarkdownFiles(app: App, rootFolderPath: string): Promise<TFile[]> {
+  const files: TFile[] = [];
+  for (const file of selectBulkPushMarkdownFiles(app, rootFolderPath)) {
+    if (!(await isContainerIndexFile(app, file))) {
+      files.push(file);
+    }
+  }
+  return files;
 }
 
 async function auditHierarchyWithContext(context: HierarchyContext): Promise<HierarchyAuditResult> {
