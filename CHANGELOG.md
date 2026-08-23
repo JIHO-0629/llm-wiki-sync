@@ -2,6 +2,7 @@
 
 ## 0.8.2
 
+- Published in the official Obsidian Community Plugins directory.
 - Added a live progress modal for folder and entire-vault sync with phases, current item, elapsed time, and running counters.
 - Added a global sync execution lock so sync, push, repair, initialize, and audit entry points do not overlap with an active sync run.
 - Added phase timing diagnostics for folder sync when verbose debug logging is enabled.
