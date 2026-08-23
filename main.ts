@@ -66,7 +66,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.4";
+const VERSION_LABEL = "v0.8.5";
 
 interface SyncRunState {
   type: string | null;
@@ -89,7 +89,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.4 loaded");
+    console.debug("[LLM Wiki Sync] v0.8.5 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 

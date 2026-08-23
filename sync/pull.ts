@@ -8,6 +8,7 @@ import {
   getRemoteSyncSnapshotFromFetched,
   logBaselineNotAdvanced,
   logConflictState,
+  normalizeSyncBody,
   type RemoteSyncSnapshot,
   type SyncBaselineStore
 } from "./baseline";
@@ -21,6 +22,7 @@ import {
   normalizePulledMarkdown,
   NOTION_PAGE_ID_PROPERTY,
   NOTION_PAGE_ROLE_PROPERTY,
+  removeNotionPageMappingFromMarkdown,
   replaceMarkdownBodyPreservingFrontmatter
 } from "./mapping";
 import {
@@ -136,6 +138,35 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
 
         if (storedFolderPath.status === "matched" && mappedFiles.length === 1) {
           const expectedIndexPath = normalizePath(`${storedFolderPath.folderPath}/${CONTAINER_INDEX_FILE}`);
+          const expectedFolderPath = getExpectedMappedFolderPath(childPage, parentFolderPath, rootPageId, storedFolderPath.folderPath, rawTitle);
+          const folderPath = getMigratedLegacyPullPath(storedFolderPath.folderPath, expectedFolderPath);
+          if (
+            isLegacyPullPath(mappedFiles[0].path) &&
+            childPage.hasChildren &&
+            !pageMarkdown.truncated &&
+            normalizeVaultFolderPath(folderPath) === normalizeVaultFolderPath(expectedFolderPath)
+          ) {
+            const migrationResult = await migrateMappedNoteToContainerIndex({
+              app: options.app,
+              baselineStore: options.baselineStore,
+              mappedFile: mappedFiles[0],
+              folderPath,
+              pageId: childPage.id,
+              ownMarkdown,
+              remoteSnapshot: ownRemoteSnapshot,
+              directChildren: childPage.directChildren,
+              normalizedRootPageId,
+              store,
+              runId,
+              counts,
+              pageLog
+            });
+            if (migrationResult !== "blocked") {
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), folderPath);
+              counts.skipped += 1;
+              continue;
+            }
+          }
           if (!(await isMappedContainerIndexFile(options.app, mappedFiles[0], expectedIndexPath))) {
             folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
             blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
@@ -218,6 +249,7 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
               pageId: childPage.id,
               ownMarkdown,
               remoteSnapshot: ownRemoteSnapshot,
+              directChildren: childPage.directChildren,
               normalizedRootPageId,
               store,
               runId,
@@ -650,6 +682,7 @@ async function migrateMappedNoteToContainerIndex(options: {
   pageId: string;
   ownMarkdown: string;
   remoteSnapshot: RemoteSyncSnapshot;
+  directChildren: Array<{ id: string; title: string }>;
   normalizedRootPageId: string;
   store: PullStore | undefined;
   runId: string;
@@ -679,7 +712,7 @@ async function migrateMappedNoteToContainerIndex(options: {
   const localSnapshot = await getLocalSyncSnapshot(options.app, options.mappedFile);
   const change = compareSnapshotsToBaseline(baseline, localSnapshot, options.remoteSnapshot);
   logConflictState(options.runId, change.localChanged, change.remoteChanged, change.state);
-  if (change.state === "LOCAL_ONLY_CHANGED" || change.state === "CONFLICT") {
+  if ((change.state === "LOCAL_ONLY_CHANGED" || change.state === "CONFLICT") && !(await hasOnlyStructuralLegacyLocalChanges(options))) {
     console.warn(`${options.pageLog} mapped-note migration skipped: local content changed`);
     return "blocked";
   }
@@ -732,6 +765,19 @@ async function migrateMappedNoteToContainerIndex(options: {
     }
     return "blocked";
   }
+}
+
+async function hasOnlyStructuralLegacyLocalChanges(options: {
+  app: App;
+  mappedFile: TFile;
+  ownMarkdown: string;
+  directChildren: Array<{ id: string; title: string }>;
+}): Promise<boolean> {
+  const markdown = await options.app.vault.read(options.mappedFile);
+  const body = removeNotionPageMappingFromMarkdown(markdown);
+  const localOwnBody = normalizeSyncBody(normalizePulledMarkdown(stripDirectChildPageReferences(body, options.directChildren)));
+  const remoteOwnBody = normalizeSyncBody(options.ownMarkdown);
+  return localOwnBody === remoteOwnBody;
 }
 
 function createFrontmatterForContainerIndex(pageId: string): string {
