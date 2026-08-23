@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.4
+
+- Added Notion -> Obsidian vault-root hierarchy reconciliation.
+- Represented hybrid Notion parent pages as `folder/_index.md`.
+- Migrated legacy `LLM Wiki Sync Pull` paths into the canonical vault hierarchy.
+- Added safe `container_index` handling across normal sync, push, folder sync, baseline initialization, and conflict resolution.
+- Restored escaped Obsidian wikilinks from Notion Markdown.
+- Kept Obsidian frontmatter local instead of pushing YAML metadata to Notion.
+
 ## 0.8.2
 
 - Added a live progress modal for folder and entire-vault sync with phases, current item, elapsed time, and running counters.

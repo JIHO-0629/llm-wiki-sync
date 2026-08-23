@@ -1,6 +1,6 @@
 {
   "name": "llm-wiki-sync",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Sync Markdown notes with Notion bidirectionally with explicit conflict protection.",
   "main": "main.js",
   "scripts": {
@@ -9,9 +9,10 @@
     "test:file-name": "node tests/fileName.test.mjs",
     "test:baseline": "node tests/baseline.test.mjs",
     "test:create-page-markdown": "node tests/createPageMarkdown.test.mjs",
+    "test:mapping": "node tests/mapping.test.mjs",
     "test:pull": "node tests/pull.test.mjs",
     "test:bulk-push": "node tests/bulkPush.test.mjs",
-    "test": "npm run test:file-name && npm run test:baseline && npm run test:create-page-markdown && npm run test:pull && npm run test:bulk-push"
+    "test": "npm run test:file-name && npm run test:baseline && npm run test:create-page-markdown && npm run test:mapping && npm run test:pull && npm run test:bulk-push"
   },
   "keywords": [
     "obsidian",

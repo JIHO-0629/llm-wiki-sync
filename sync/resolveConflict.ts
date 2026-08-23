@@ -15,6 +15,7 @@ import {
 import {
   findFilesMappedToPage,
   getNotionPageMapping,
+  isContainerIndexFile,
   normalizePulledMarkdown,
   replaceMarkdownBodyPreservingFrontmatter
 } from "./mapping";
@@ -60,6 +61,10 @@ async function getResolvePreflight(options: ResolveConflictOptions, runId: strin
   const file = options.app.workspace.getActiveFile();
   if (!file || file.extension !== "md") {
     new Notice("LLM Wiki Sync: No active Markdown file to resolve");
+    return null;
+  }
+  if (await isContainerIndexFile(options.app, file)) {
+    new Notice("LLM Wiki Sync: Container index conflict resolution is not supported by normal note conflict resolution.");
     return null;
   }
 

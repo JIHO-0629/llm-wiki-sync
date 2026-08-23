@@ -1,6 +1,7 @@
 import { Modal, Notice, normalizePath, Setting, type App, type TFile } from "obsidian";
 import { extractNotionPageId, NotionApiError, NotionClient } from "../notionClient";
 import type { SyncBaselineStore } from "./baseline";
+import { isContainerIndexFile, isContainerIndexFileFromCache } from "./mapping";
 import { pushFileToNotion, type PushFileResult } from "./push";
 
 export interface FolderMapping {
@@ -12,6 +13,7 @@ export interface FolderMapping {
 export interface FolderMappingStore {
   getFolderMapping(mappingKey: string): FolderMapping | null;
   saveFolderMapping(mappingKey: string, mapping: FolderMapping): Promise<void>;
+  removeFolderMapping(mappingKey: string): Promise<void>;
 }
 
 export interface BulkPushStore extends SyncBaselineStore, FolderMappingStore {}
@@ -70,6 +72,7 @@ export function selectBulkPushMarkdownFiles(app: App, rootFolderPath: string): T
   const normalizedRootFolderPath = normalizeVaultFolderPath(rootFolderPath);
   return app.vault.getMarkdownFiles()
     .filter((file) => isBulkPushMarkdownFile(file, normalizedRootFolderPath))
+    .filter((file) => !isContainerIndexFileFromCache(app, file))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -114,6 +117,16 @@ async function pushSelectedFilesToNotion(options: BulkPushOptions, selection: { 
 
   for (const file of selection.files) {
     try {
+      if (await isContainerIndexFile(options.app, file)) {
+        const result = {
+          status: "failed" as const,
+          filePath: file.path,
+          message: "Container index files are excluded from normal Bulk Push."
+        };
+        fileResults.push(result);
+        counts.failed += 1;
+        continue;
+      }
       const folderPath = getFolderPath(file.path);
       const parentPageId = await ensureFolderPage({
         client,

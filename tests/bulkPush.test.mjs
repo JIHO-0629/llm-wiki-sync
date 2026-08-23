@@ -21,6 +21,7 @@ const notices = [];
 const pages = new Map();
 const createRequests = [];
 const markdownPatches = [];
+const titlePatches = [];
 const moveRequests = [];
 const forbiddenRequests = [];
 const childListRequests = new Map();
@@ -152,6 +153,7 @@ async function requestUrl(request) {
     const body = JSON.parse(request.body);
     page.title = body.properties.title.title[0].text.content;
     page.lastEditedTime = new Date().toISOString();
+    titlePatches.push({ pageId, title: page.title });
     return ok(pageDetails(page));
   }
 
@@ -223,6 +225,8 @@ function loadModule(entryPoint) {
 const { pushEntireVaultToNotion, selectBulkPushMarkdownFiles } = loadModule("sync/bulkPush.ts");
 const { pushCurrentNoteToNotion, pushFileToNotion } = loadModule("sync/push.ts");
 const { auditWorkspaceHierarchy, repairWorkspaceHierarchy, initializeWorkspaceMappings, resolveNotionParentForFile } = loadModule("sync/hierarchy.ts");
+const { initializeSyncBaseline } = loadModule("sync/initializeBaseline.ts");
+const { resolveConflict } = loadModule("sync/resolveConflict.ts");
 const { syncFolderWithNotion } = loadModule("sync/folderSync.ts");
 const { syncCurrentNote } = loadModule("sync/syncCurrentNote.ts");
 const { NotionClient } = loadModule("notionClient.ts");
@@ -255,10 +259,15 @@ function createApp(files, activePath = null) {
       },
       async read(file) {
         return file.content;
+      },
+      async process(file, callback) {
+        file.content = callback(file.content);
+        file.stat.mtime += 1;
       }
     },
     metadataCache: {
       getFileCache(file) {
+        if (file.cacheMiss === true) return null;
         return { frontmatter: parseFrontmatter(file.content) };
       }
     },
@@ -268,6 +277,15 @@ function createApp(files, activePath = null) {
         callback(frontmatter);
         const body = stripFrontmatter(file.content);
         file.content = `---\n${Object.entries(frontmatter).map(([key, value]) => `${key}: "${String(value)}"`).join("\n")}\n---\n\n${body}`;
+      },
+      async renameFile(file, targetPath) {
+        if (fileMap.has(targetPath)) throw new Error(`Path already exists: ${targetPath}`);
+        fileMap.delete(file.path);
+        file.path = normalizePath(targetPath);
+        file.extension = file.path.includes(".") ? file.path.split(".").pop() : "";
+        file.basename = path.posix.basename(file.path, file.extension ? `.${file.extension}` : "");
+        file.stat.mtime += 1;
+        fileMap.set(file.path, file);
       }
     }
   };
@@ -307,6 +325,9 @@ function makeStore() {
     },
     async saveFolderMapping(mappingKey, mapping) {
       this.folderMappings[mappingKey] = mapping;
+    },
+    async removeFolderMapping(mappingKey) {
+      delete this.folderMappings[mappingKey];
     },
     getAllSyncBaselinePageIds() {
       return Object.keys(this.baselines);
@@ -402,6 +423,7 @@ const files = [
   makeFile("Canvas.canvas", "{}"),
   makeFile("LLM Wiki Sync Pull/Pulled.md", "pulled\n"),
   makeFile("LLM Wiki Sync Review/Skip.md", "skip\n"),
+  makeFile("10_Projects/Hybrid/_index.md", "---\nnotion_page_id: \"hybrid-page\"\nnotion_page_role: \"container_index\"\n---\n\ncontainer body\n"),
   makeFile("Clean.md", "---\nnotion_page_id: \"clean-page\"\n---\n\nclean\n"),
   makeFile("Local.md", "---\nnotion_page_id: \"local-page\"\n---\n\nnew local\n"),
   makeFile("Remote.md", "---\nnotion_page_id: \"remote-page\"\n---\n\nremote\n"),
@@ -431,6 +453,7 @@ assert.equal(selected.some((file) => file.path === "Skip.yaml"), false);
 assert.equal(selected.some((file) => file.path === "Canvas.canvas"), false);
 assert.equal(selected.some((file) => file.path === "LLM Wiki Sync Pull/Pulled.md"), false);
 assert.equal(selected.some((file) => file.path === "LLM Wiki Sync Review/Skip.md"), false);
+assert.equal(selected.some((file) => file.path === "10_Projects/Hybrid/_index.md"), false);
 const currentFolderSelected = selectBulkPushMarkdownFiles(app, "20_Knowledge");
 assert.deepEqual(currentFolderSelected.map((file) => file.path), [
   "20_Knowledge/Medicine/Heart.md",
@@ -940,6 +963,55 @@ moveRequests.length = 0;
 forbiddenRequests.length = 0;
 nextPageId = 1;
 addPage(ROOT_PAGE_ID, "Root", "");
+addPage("frontmatter-page", "Frontmatter", "old\n", ROOT_PAGE_ID);
+const frontmatterFile = makeFile("Frontmatter.md", "---\ntype: \"note\"\nstatus: \"draft\"\ncreated: \"2026-08-22\"\nupdated: \"2026-08-23\"\nnotion_page_id: \"frontmatter-page\"\nnotion_page_role: \"container_index\"\n---\n\nnew body\n");
+const frontmatterApp = createApp([frontmatterFile], "Frontmatter.md");
+const frontmatterStore = makeStore();
+frontmatterStore.baselines[normalizePageId("frontmatter-page")] = makeBaseline("frontmatter-page", "Frontmatter", "\nold\n", "Frontmatter", "old\n");
+const frontmatterPush = await pushFileToNotion({
+  app: frontmatterApp,
+  file: frontmatterFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: ROOT_PAGE_ID,
+  expectedParentPageId: ROOT_PAGE_ID,
+  baselineStore: frontmatterStore
+});
+assert.equal(frontmatterPush.status, "failed");
+assert.equal(markdownPatches.length, 0);
+
+const regularFrontmatterFile = makeFile("Regular Frontmatter.md", "---\ntype: \"note\"\nstatus: \"draft\"\ncreated: \"2026-08-22\"\nupdated: \"2026-08-23\"\nnotion_page_id: \"frontmatter-page\"\n---\n\nnew body\n");
+const regularFrontmatterApp = createApp([regularFrontmatterFile], "Regular Frontmatter.md");
+const regularFrontmatterStore = makeStore();
+regularFrontmatterStore.baselines[normalizePageId("frontmatter-page")] = makeBaseline("frontmatter-page", "Regular Frontmatter", "\nold\n", "Frontmatter", "old\n");
+const regularFrontmatterPush = await pushFileToNotion({
+  app: regularFrontmatterApp,
+  file: regularFrontmatterFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: ROOT_PAGE_ID,
+  expectedParentPageId: ROOT_PAGE_ID,
+  baselineStore: regularFrontmatterStore
+});
+const frontmatterPatch = markdownPatches.find((patch) => patch.pageId === "frontmatter-page");
+assert.equal(regularFrontmatterPush.status, "updated");
+assert.equal(frontmatterPatch.markdown, "\nnew body\n");
+assert.equal(frontmatterPatch.markdown.includes("---"), false);
+assert.equal(frontmatterPatch.markdown.includes("type:"), false);
+assert.equal(frontmatterPatch.markdown.includes("status:"), false);
+assert.equal(frontmatterPatch.markdown.includes("created:"), false);
+assert.equal(frontmatterPatch.markdown.includes("updated:"), false);
+assert.equal(frontmatterPatch.markdown.includes("notion_page_id"), false);
+assert.equal(frontmatterPatch.markdown.includes("notion_page_role"), false);
+assert.equal(regularFrontmatterFile.content.includes("type: \"note\""), true);
+assert.equal(regularFrontmatterFile.content.includes("notion_page_id: \"frontmatter-page\""), true);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
 addPage("linked-conflict-page", "Linked conflict", "\nremote\n", ROOT_PAGE_ID);
 const linkedConflictFile = makeFile("Area/Sub/Linked conflict.md", "---\nnotion_page_id: \"linked-conflict-page\"\n---\n\nlocal\n");
 const linkedConflictApp = createApp([linkedConflictFile], "Area/Sub/Linked conflict.md");
@@ -1071,6 +1143,108 @@ assert.equal(duplicateTitleResult.status, "ambiguous");
 assert.equal(createRequests.length, 0);
 assert.equal(markdownPatches.length, 0);
 assert.equal(duplicateTitleFile.content.includes("notion_page_id"), false);
+
+pages.clear();
+notices.length = 0;
+createRequests.length = 0;
+markdownPatches.length = 0;
+moveRequests.length = 0;
+forbiddenRequests.length = 0;
+nextPageId = 1;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("hybrid-page", "Hybrid", "container body\n", ROOT_PAGE_ID);
+const containerCreateCountBefore = createRequests.length;
+const containerTitlePatchCountBefore = titlePatches.filter((patch) => patch.pageId === "hybrid-page").length;
+const containerIndexFile = makeFile("10_Projects/Hybrid/_index.md", "---\nnotion_page_id: \"hybrid-page\"\nnotion_page_role: \"container_index\"\n---\n\ncontainer body\n");
+const containerIndexApp = createApp([containerIndexFile], "10_Projects/Hybrid/_index.md");
+const containerIndexStore = makeStore();
+containerIndexStore.baselines[normalizePageId("hybrid-page")] = makeBaseline("hybrid-page", "_index", "\ncontainer body\n", "Hybrid", "container body\n");
+const containerIndexPush = await pushFileToNotion({
+  app: containerIndexApp,
+  file: containerIndexFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: "hybrid-page",
+  expectedParentPageId: "hybrid-page",
+  repairMisplacedParent: true,
+  baselineStore: containerIndexStore
+});
+assert.equal(containerIndexPush.status, "failed");
+assert.equal(moveRequests.some((request) => request.pageId === "hybrid-page" && request.parentPageId === "hybrid-page"), false);
+assert.equal(markdownPatches.length, 0);
+assert.equal(titlePatches.filter((patch) => patch.pageId === "hybrid-page").length, containerTitlePatchCountBefore);
+assert.equal(pages.get("hybrid-page").title, "Hybrid");
+const containerFolderSummary = await syncFolderWithNotion({
+  app: containerIndexApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: containerIndexStore,
+  folderPath: "10_Projects/Hybrid"
+});
+assert.ok(containerFolderSummary);
+assert.equal(containerFolderSummary.total, 0);
+assert.equal(moveRequests.some((request) => request.pageId === "hybrid-page" && request.parentPageId === "hybrid-page"), false);
+assert.equal(markdownPatches.length, 0);
+assert.equal(createRequests.length, containerCreateCountBefore);
+assert.equal(titlePatches.filter((patch) => patch.pageId === "hybrid-page").length, containerTitlePatchCountBefore);
+assert.equal(pages.get("hybrid-page").title, "Hybrid");
+
+const cacheMissIndexFile = makeFile("10_Projects/Hybrid Cache Miss/_index.md", "---\nnotion_page_id: \"hybrid-page\"\nnotion_page_role: \"container_index\"\n---\n\ncontainer body\n");
+cacheMissIndexFile.cacheMiss = true;
+const cacheMissIndexApp = createApp([cacheMissIndexFile], "10_Projects/Hybrid Cache Miss/_index.md");
+const cacheMissCreateCountBefore = createRequests.length;
+const cacheMissMoveCountBefore = moveRequests.length;
+const cacheMissMarkdownPatchCountBefore = markdownPatches.length;
+const cacheMissTitlePatchCountBefore = titlePatches.filter((patch) => patch.pageId === "hybrid-page").length;
+const cacheMissSummary = await syncFolderWithNotion({
+  app: cacheMissIndexApp,
+  token: "secret_test",
+  rootPageUrl: `https://www.notion.so/${ROOT_PAGE_ID.replace(/-/g, "")}`,
+  store: makeStore(),
+  folderPath: "10_Projects/Hybrid Cache Miss"
+});
+assert.ok(cacheMissSummary);
+assert.equal(cacheMissSummary.total, 1);
+assert.equal(cacheMissSummary.processed, 1);
+assert.equal(moveRequests.length, cacheMissMoveCountBefore);
+assert.equal(createRequests.length, cacheMissCreateCountBefore);
+assert.equal(markdownPatches.length, cacheMissMarkdownPatchCountBefore);
+assert.equal(titlePatches.filter((patch) => patch.pageId === "hybrid-page").length, cacheMissTitlePatchCountBefore);
+assert.equal(pages.get("hybrid-page").title, "Hybrid");
+
+const conflictIndexFile = makeFile("10_Projects/Hybrid Conflict/_index.md", "---\nnotion_page_id: \"hybrid-page\"\nnotion_page_role: \"container_index\"\n---\n\nlocal container body\n");
+const conflictIndexApp = createApp([conflictIndexFile], "10_Projects/Hybrid Conflict/_index.md");
+const conflictIndexStore = makeStore();
+conflictIndexStore.baselines[normalizePageId("hybrid-page")] = makeBaseline("hybrid-page", "_index", "\nold local\n", "Hybrid", "old remote\n");
+const conflictOriginalContent = conflictIndexFile.content;
+const conflictOriginalPath = conflictIndexFile.path;
+const conflictBaselineBefore = JSON.stringify(conflictIndexStore.baselines[normalizePageId("hybrid-page")]);
+const conflictMoveCountBefore = moveRequests.length;
+const conflictMarkdownPatchCountBefore = markdownPatches.length;
+const conflictTitlePatchCountBefore = titlePatches.length;
+await resolveConflict({
+  app: conflictIndexApp,
+  token: "secret_test",
+  baselineStore: conflictIndexStore,
+  strategy: "KEEP_OBSIDIAN"
+});
+assert.equal(markdownPatches.length, conflictMarkdownPatchCountBefore);
+assert.equal(titlePatches.length, conflictTitlePatchCountBefore);
+assert.equal(moveRequests.length, conflictMoveCountBefore);
+await resolveConflict({
+  app: conflictIndexApp,
+  token: "secret_test",
+  baselineStore: conflictIndexStore,
+  strategy: "KEEP_NOTION"
+});
+assert.equal(conflictIndexFile.path, conflictOriginalPath);
+assert.equal(conflictIndexFile.content, conflictOriginalContent);
+assert.equal(markdownPatches.length, conflictMarkdownPatchCountBefore);
+assert.equal(titlePatches.length, conflictTitlePatchCountBefore);
+assert.equal(moveRequests.length, conflictMoveCountBefore);
+await initializeSyncBaseline(conflictIndexApp, "secret_test", conflictIndexStore);
+assert.equal(JSON.stringify(conflictIndexStore.baselines[normalizePageId("hybrid-page")]), conflictBaselineBefore);
+assert.equal(conflictIndexFile.path, conflictOriginalPath);
+assert.equal(conflictIndexFile.content, conflictOriginalContent);
 
 const lock = new SyncExecutionLock();
 const firstLockRun = lock.run("sync-folder", "test", async () => {

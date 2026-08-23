@@ -131,6 +131,10 @@ function createApp(initialFiles = [], initialFolders = []) {
         return file.content;
       },
       async process(file, callback) {
+        if (file.failProcessOnce === true) {
+          file.failProcessOnce = false;
+          throw new Error("simulated process failure");
+        }
         file.content = callback(file.content);
         file.stat.mtime += 1;
       }
@@ -200,6 +204,9 @@ function makeStore() {
     },
     async saveFolderMapping(mappingKey, mapping) {
       this.folderMappings[mappingKey] = mapping;
+    },
+    async removeFolderMapping(mappingKey) {
+      delete this.folderMappings[mappingKey];
     },
     getAllFolderMappings() {
       return Object.values(this.folderMappings);
@@ -300,7 +307,7 @@ addPage("root-note", "Root Note", "root body\n");
 const rootApp = createApp();
 const rootStore = makeStore();
 await runPull(rootApp, rootStore);
-assert.ok(rootApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Root Note.md"));
+assert.ok(rootApp.vault.getAbstractFileByPath("Root Note.md"));
 assert.ok(rootStore.baselines[normalizePageId("root-note")]);
 
 resetRemote();
@@ -313,6 +320,8 @@ await runPull(reviewApp, reviewStore);
 assert.equal(reviewApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/LLM Wiki Sync Review.md"), null);
 assert.equal(reviewApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/LLM Wiki Sync Review"), null);
 assert.equal(reviewApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/LLM Wiki Sync Review/Obsidian missing/Some Page.md"), null);
+assert.equal(reviewApp.vault.getAbstractFileByPath("LLM Wiki Sync Review.md"), null);
+assert.equal(reviewApp.vault.getAbstractFileByPath("LLM Wiki Sync Review"), null);
 assert.equal(reviewStore.baselines[normalizePageId("review-root")], undefined);
 assert.equal(reviewStore.baselines[normalizePageId("review-page")], undefined);
 
@@ -322,9 +331,9 @@ addPage("nested-note", "Nested Note", "nested body\n", "folder-a");
 const nestedApp = createApp();
 const nestedStore = makeStore();
 await runPull(nestedApp, nestedStore);
-assert.ok(nestedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Folder A"));
-assert.ok(nestedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Folder A/Nested Note.md"));
-assert.equal(nestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Folder A")].notionPageId, "folder-a");
+assert.ok(nestedApp.vault.getAbstractFileByPath("Folder A"));
+assert.ok(nestedApp.vault.getAbstractFileByPath("Folder A/Nested Note.md"));
+assert.equal(nestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Folder A")].notionPageId, "folder-a");
 
 resetRemote();
 addPage(
@@ -336,8 +345,8 @@ addPage("realistic-nested-note", "Nested Note", "nested body\n", "realistic-fold
 const realisticNestedApp = createApp();
 const realisticNestedStore = makeStore();
 await runPull(realisticNestedApp, realisticNestedStore);
-assert.ok(realisticNestedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Folder A/Nested Note.md"));
-assert.equal(realisticNestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Folder A")].notionPageId, "realistic-folder");
+assert.ok(realisticNestedApp.vault.getAbstractFileByPath("Folder A/Nested Note.md"));
+assert.equal(realisticNestedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Folder A")].notionPageId, "realistic-folder");
 
 resetRemote();
 addPage(
@@ -351,9 +360,9 @@ addPage("truncated-child", "Child", "child\n", "truncated-folder");
 const truncatedApp = createApp();
 const truncatedStore = makeStore();
 await runPull(truncatedApp, truncatedStore);
-assert.equal(truncatedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Truncated Folder"), null);
-assert.equal(truncatedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Truncated Folder/Child.md"), null);
-assert.equal(truncatedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Truncated Folder")], undefined);
+assert.equal(truncatedApp.vault.getAbstractFileByPath("Truncated Folder"), null);
+assert.equal(truncatedApp.vault.getAbstractFileByPath("Truncated Folder/Child.md"), null);
+assert.equal(truncatedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Truncated Folder")], undefined);
 
 resetRemote();
 addPage("level-one", "One", "");
@@ -362,9 +371,9 @@ addPage("level-three-note", "Three", "deep\n", "level-two");
 const deepApp = createApp();
 const deepStore = makeStore();
 await runPull(deepApp, deepStore);
-assert.ok(deepApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/One/Two/Three.md"));
-assert.equal(deepStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/One")].notionPageId, "level-one");
-assert.equal(deepStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/One/Two")].notionPageId, "level-two");
+assert.ok(deepApp.vault.getAbstractFileByPath("One/Two/Three.md"));
+assert.equal(deepStore.folderMappings[mappingKey(ROOT_PAGE_ID, "One")].notionPageId, "level-one");
+assert.equal(deepStore.folderMappings[mappingKey(ROOT_PAGE_ID, "One/Two")].notionPageId, "level-two");
 
 resetRemote();
 addPage("mapped-folder", "Remote Folder", "");
@@ -377,8 +386,9 @@ mappedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Remote F
   rootPageId: normalizePageId(ROOT_PAGE_ID)
 };
 await runPull(mappedApp, mappedStore);
-assert.ok(mappedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Remote Folder/Child.md"));
-assert.equal(mappedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Remote Folder")].notionPageId, "mapped-folder");
+assert.ok(mappedApp.vault.getAbstractFileByPath("Remote Folder/Child.md"));
+assert.equal(mappedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Remote Folder")].notionPageId, "mapped-folder");
+assert.equal(mappedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Remote Folder")], undefined);
 
 resetRemote();
 addPage("existing-folder", "Existing Folder", '<page url="https://www.notion.so/new-folder">New Folder</page>\n');
@@ -410,6 +420,48 @@ assert.equal(JSON.stringify(obsidianOriginStore.folderMappings), obsidianOriginM
 assert.deepEqual(Object.keys(obsidianOriginStore.baselines).sort(), obsidianOriginBaselines);
 
 resetRemote();
+addPage("projects-folder", "10_Projects", '<page url="https://www.notion.so/dev-record">LLM Wiki Sync 개발 기록</page>\n');
+addPage(
+  "dev-record",
+  "LLM Wiki Sync 개발 기록",
+  'meaningful parent body\n<page url="https://www.notion.so/why-start">01_왜 시작했는가</page>\n<page url="https://www.notion.so/pre-release">02_첫 Release 전 검증과 준비</page>\n<page url="https://www.notion.so/post-release">03_첫 Release 이후 피드백과 개선</page>\n<page url="https://www.notion.so/retrospective">04_총평_우리가 만든 것과 배운 것</page>\n',
+  "projects-folder"
+);
+addPage("why-start", "01_왜 시작했는가", "why\n", "dev-record");
+addPage("pre-release", "02_첫 Release 전 검증과 준비", "pre\n", "dev-record");
+addPage("post-release", "03_첫 Release 이후 피드백과 개선", "post\n", "dev-record");
+addPage("retrospective", "04_총평_우리가 만든 것과 배운 것", "retro\n", "dev-record");
+const legacyProjectsFile = makeFile("LLM Wiki Sync Pull/10_Projects.md", "---\nnotion_page_id: \"projects-folder\"\n---\n\n");
+const realUseApp = createApp([legacyProjectsFile], ["10_Projects", "LLM Wiki Sync Pull"]);
+const realUseStore = makeStore();
+realUseStore.baselines[normalizePageId("projects-folder")] = makeBaseline("projects-folder", "10_Projects", "\n", "10_Projects", "\n");
+await runPull(realUseApp, realUseStore);
+const indexFile = realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/_index.md");
+assert.ok(indexFile);
+assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/01_왜 시작했는가.md"));
+assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/02_첫 Release 전 검증과 준비.md"));
+assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/03_첫 Release 이후 피드백과 개선.md"));
+assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/04_총평_우리가 만든 것과 배운 것.md"));
+assert.equal(realUseApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/10_Projects"), null);
+assert.equal(realUseApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/10_Projects.md"), null);
+assert.equal(realUseStore.folderMappings[mappingKey(ROOT_PAGE_ID, "10_Projects")].notionPageId, "projects-folder");
+assert.equal(realUseStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/10_Projects")], undefined);
+assert.equal(realUseStore.getAllFolderMappings().filter((mapping) => normalizePageId(mapping.notionPageId) === normalizePageId("projects-folder")).length, 1);
+assert.equal(parseFrontmatter(indexFile.content).notion_page_id, "dev-record");
+assert.equal(parseFrontmatter(indexFile.content).notion_page_role, "container_index");
+assert.equal(indexFile.content.includes("meaningful parent body"), true);
+assert.equal(indexFile.content.includes("<page "), false);
+const realUseFiles = realUseApp._files.map((file) => [file.path, file.content]);
+const realUseFolders = Array.from(realUseApp._folders).sort();
+const realUseMappings = JSON.stringify(realUseStore.folderMappings);
+const realUseBaselines = Object.keys(realUseStore.baselines).sort();
+await runPull(realUseApp, realUseStore);
+assert.deepEqual(realUseApp._files.map((file) => [file.path, file.content]), realUseFiles);
+assert.deepEqual(Array.from(realUseApp._folders).sort(), realUseFolders);
+assert.equal(JSON.stringify(realUseStore.folderMappings), realUseMappings);
+assert.deepEqual(Object.keys(realUseStore.baselines).sort(), realUseBaselines);
+
+resetRemote();
 addPage("mapped-folder-content", "Mapped Folder", "real body\n<page url=\"https://www.notion.so/mapped-folder-content-child\">Child</page>\n");
 addPage("mapped-folder-content-child", "Child", "child\n", "mapped-folder-content");
 const mappedFolderContentApp = createApp([], ["LLM Wiki Sync Pull", "LLM Wiki Sync Pull/Mapped Folder"]);
@@ -420,7 +472,22 @@ mappedFolderContentStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync 
   rootPageId: normalizePageId(ROOT_PAGE_ID)
 };
 await runPull(mappedFolderContentApp, mappedFolderContentStore);
-assert.equal(mappedFolderContentApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Mapped Folder/Child.md"), null);
+assert.ok(mappedFolderContentApp.vault.getAbstractFileByPath("Mapped Folder/_index.md"));
+assert.ok(mappedFolderContentApp.vault.getAbstractFileByPath("Mapped Folder/Child.md"));
+assert.equal(mappedFolderContentStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Mapped Folder")], undefined);
+
+resetRemote();
+addPage("collision-container", "Collision Container", 'body\n<page url="https://www.notion.so/collision-child">Child</page>\n');
+addPage("collision-child", "Child", "child\n", "collision-container");
+const collisionLegacyFile = makeFile("LLM Wiki Sync Pull/Collision Container.md", "---\nnotion_page_id: \"collision-container\"\n---\n\nbody\n");
+const collisionIndexFile = makeFile("Collision Container/_index.md", "existing\n");
+const collisionMigrationApp = createApp([collisionLegacyFile, collisionIndexFile], ["LLM Wiki Sync Pull", "Collision Container"]);
+const collisionMigrationStore = makeStore();
+collisionMigrationStore.baselines[normalizePageId("collision-container")] = makeBaseline("collision-container", "Collision Container", "\nbody\n", "Collision Container", "body\n");
+await runPull(collisionMigrationApp, collisionMigrationStore);
+assert.equal(collisionMigrationApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Collision Container.md"), collisionLegacyFile);
+assert.equal(collisionMigrationApp.vault.getAbstractFileByPath("Collision Container/_index.md").content, "existing\n");
+assert.equal(collisionMigrationStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Collision Container")], undefined);
 
 resetRemote();
 addPage("dual-identity", "Dual", '<page url="https://www.notion.so/dual-child">Child</page>\n');
@@ -439,6 +506,20 @@ assert.equal(dualFile.content, "---\nnotion_page_id: \"dual-identity\"\n---\n\nl
 assert.equal(dualApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Dual/Child.md"), null);
 
 resetRemote();
+addPage("roleless-container", "Roleless", '<page url="https://www.notion.so/roleless-child">Child</page>\n');
+addPage("roleless-child", "Child", "child\n", "roleless-container");
+const rolelessIndex = makeFile("Roleless/_index.md", "---\nnotion_page_id: \"roleless-container\"\n---\n\n");
+const rolelessApp = createApp([rolelessIndex], ["Roleless"]);
+const rolelessStore = makeStore();
+rolelessStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Roleless")] = {
+  notionPageId: "roleless-container",
+  lastKnownPath: "Roleless",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+await runPull(rolelessApp, rolelessStore);
+assert.equal(rolelessApp.vault.getAbstractFileByPath("Roleless/Child.md"), null);
+
+resetRemote();
 addPage("remote-parent", "Remote Parent", '<page url="https://www.notion.so/stale-folder">Stale Folder</page>\n');
 addPage("stale-folder", "Stale Folder", '<page url="https://www.notion.so/stale-child">Child</page>\n', "remote-parent");
 addPage("stale-child", "Child", "child\n", "stale-folder");
@@ -450,25 +531,25 @@ staleStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Old Paren
   rootPageId: normalizePageId(ROOT_PAGE_ID)
 };
 await runPull(staleApp, staleStore);
-assert.ok(staleApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Remote Parent"));
+assert.ok(staleApp.vault.getAbstractFileByPath("Remote Parent"));
 assert.equal(staleApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Old Parent/Stale Folder"), null);
-assert.equal(staleApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Remote Parent/Stale Folder"), null);
-assert.equal(staleApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Remote Parent/Stale Folder/Child.md"), null);
+assert.equal(staleApp.vault.getAbstractFileByPath("Remote Parent/Stale Folder"), null);
+assert.equal(staleApp.vault.getAbstractFileByPath("Remote Parent/Stale Folder/Child.md"), null);
 
 resetRemote();
 addPage("conflicting-folder", "Conflict Folder", '<page url="https://www.notion.so/conflicting-child">Child</page>\n');
 addPage("conflicting-child", "Child", "child\n", "conflicting-folder");
 const conflictFolderApp = createApp();
 const conflictFolderStore = makeStore();
-conflictFolderStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Conflict Folder")] = {
+conflictFolderStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Conflict Folder")] = {
   notionPageId: "other-folder",
-  lastKnownPath: "LLM Wiki Sync Pull/Conflict Folder",
+  lastKnownPath: "Conflict Folder",
   rootPageId: normalizePageId(ROOT_PAGE_ID)
 };
 await runPull(conflictFolderApp, conflictFolderStore);
-assert.equal(conflictFolderStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Conflict Folder")].notionPageId, "other-folder");
-assert.equal(conflictFolderApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Conflict Folder"), null);
-assert.equal(conflictFolderApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Conflict Folder/Child.md"), null);
+assert.equal(conflictFolderStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Conflict Folder")].notionPageId, "other-folder");
+assert.equal(conflictFolderApp.vault.getAbstractFileByPath("Conflict Folder"), null);
+assert.equal(conflictFolderApp.vault.getAbstractFileByPath("Conflict Folder/Child.md"), null);
 
 resetRemote();
 addPage("multi-path-folder", "Multi Path", '<page url="https://www.notion.so/multi-path-child">Child</page>\n');
@@ -488,7 +569,7 @@ multiPathStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Path B")] = {
 await runPull(multiPathApp, multiPathStore);
 assert.equal(multiPathApp.vault.getAbstractFileByPath("Path A/Child.md"), null);
 assert.equal(multiPathApp.vault.getAbstractFileByPath("Path B/Child.md"), null);
-assert.equal(multiPathApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Multi Path/Child.md"), null);
+assert.equal(multiPathApp.vault.getAbstractFileByPath("Multi Path/Child.md"), null);
 
 resetRemote();
 addPage("duplicate-page", "Duplicate", "remote\n");
@@ -513,6 +594,72 @@ await runPull(updateApp, updateStore);
 assert.equal(updateFile.content, "---\nnotion_page_id: \"mapped-update\"\n---\nremote changed\n");
 
 resetRemote();
+addPage("frontmatter-pull", "Frontmatter Pull", "remote body\n");
+const frontmatterPullFile = makeFile("Frontmatter Pull.md", "---\ntype: \"note\"\nstatus: \"draft\"\nnotion_page_id: \"frontmatter-pull\"\n---\n\nold body\n");
+const frontmatterPullApp = createApp([frontmatterPullFile]);
+const frontmatterPullStore = makeStore();
+frontmatterPullStore.baselines[normalizePageId("frontmatter-pull")] = makeBaseline("frontmatter-pull", "Frontmatter Pull", "\nold body\n", "Frontmatter Pull", "old body\n");
+await runPull(frontmatterPullApp, frontmatterPullStore);
+assert.equal(frontmatterPullFile.content, "---\ntype: \"note\"\nstatus: \"draft\"\nnotion_page_id: \"frontmatter-pull\"\n---\nremote body\n");
+
+resetRemote();
+addPage("legacy-leaf-project", "Project", '<page url="https://www.notion.so/legacy-leaf-clean">Note</page>\n');
+addPage("legacy-leaf-clean", "Note", "same\n", "legacy-leaf-project");
+const legacyLeafCleanFile = makeFile("LLM Wiki Sync Pull/Project/Note.md", "---\ntype: \"note\"\nnotion_page_id: \"legacy-leaf-clean\"\n---\n\nsame\n");
+const legacyLeafCleanApp = createApp([legacyLeafCleanFile], ["LLM Wiki Sync Pull", "LLM Wiki Sync Pull/Project"]);
+const legacyLeafCleanStore = makeStore();
+legacyLeafCleanStore.baselines[normalizePageId("legacy-leaf-clean")] = makeBaseline("legacy-leaf-clean", "Note", "\nsame\n", "Note", "same\n");
+await runPull(legacyLeafCleanApp, legacyLeafCleanStore);
+const migratedCleanLeaf = legacyLeafCleanApp.vault.getAbstractFileByPath("Project/Note.md");
+assert.ok(migratedCleanLeaf);
+assert.equal(legacyLeafCleanApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Project/Note.md"), null);
+assert.equal(parseFrontmatter(migratedCleanLeaf.content).type, "note");
+assert.equal(parseFrontmatter(migratedCleanLeaf.content).notion_page_id, "legacy-leaf-clean");
+const legacyLeafCleanFiles = legacyLeafCleanApp._files.map((file) => [file.path, file.content]);
+const legacyLeafCleanFolders = Array.from(legacyLeafCleanApp._folders).sort();
+await runPull(legacyLeafCleanApp, legacyLeafCleanStore);
+assert.deepEqual(legacyLeafCleanApp._files.map((file) => [file.path, file.content]), legacyLeafCleanFiles);
+assert.deepEqual(Array.from(legacyLeafCleanApp._folders).sort(), legacyLeafCleanFolders);
+
+resetRemote();
+addPage("legacy-leaf-remote-project", "Project", '<page url="https://www.notion.so/legacy-leaf-remote">Note Renamed</page>\n');
+addPage("legacy-leaf-remote", "Note Renamed", "remote changed\n", "legacy-leaf-remote-project");
+const legacyLeafRemoteFile = makeFile("LLM Wiki Sync Pull/Project/Old Note.md", "---\nstatus: \"draft\"\nnotion_page_id: \"legacy-leaf-remote\"\n---\n\nold\n");
+const legacyLeafRemoteApp = createApp([legacyLeafRemoteFile], ["LLM Wiki Sync Pull", "LLM Wiki Sync Pull/Project"]);
+const legacyLeafRemoteStore = makeStore();
+legacyLeafRemoteStore.baselines[normalizePageId("legacy-leaf-remote")] = makeBaseline("legacy-leaf-remote", "Old Note", "\nold\n", "Note Renamed", "old\n");
+await runPull(legacyLeafRemoteApp, legacyLeafRemoteStore);
+const migratedRemoteLeaf = legacyLeafRemoteApp.vault.getAbstractFileByPath("Project/Note Renamed.md");
+assert.ok(migratedRemoteLeaf);
+assert.equal(legacyLeafRemoteApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Project/Old Note.md"), null);
+assert.equal(migratedRemoteLeaf.content, "---\nstatus: \"draft\"\nnotion_page_id: \"legacy-leaf-remote\"\n---\nremote changed\n");
+
+resetRemote();
+addPage("legacy-leaf-collision-project", "Project", '<page url="https://www.notion.so/legacy-leaf-collision">Note</page>\n');
+addPage("legacy-leaf-collision", "Note", "remote changed\n", "legacy-leaf-collision-project");
+const legacyLeafCollisionFile = makeFile("LLM Wiki Sync Pull/Project/Note.md", "---\nnotion_page_id: \"legacy-leaf-collision\"\n---\n\nold\n");
+const canonicalLeafCollisionFile = makeFile("Project/Note.md", "existing\n");
+const legacyLeafCollisionApp = createApp([legacyLeafCollisionFile, canonicalLeafCollisionFile], ["LLM Wiki Sync Pull", "LLM Wiki Sync Pull/Project", "Project"]);
+const legacyLeafCollisionStore = makeStore();
+legacyLeafCollisionStore.baselines[normalizePageId("legacy-leaf-collision")] = makeBaseline("legacy-leaf-collision", "Note", "\nold\n", "Note", "old\n");
+await runPull(legacyLeafCollisionApp, legacyLeafCollisionStore);
+assert.equal(legacyLeafCollisionApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Project/Note.md"), legacyLeafCollisionFile);
+assert.equal(legacyLeafCollisionFile.content.includes("remote changed"), false);
+assert.equal(canonicalLeafCollisionFile.content, "existing\n");
+
+resetRemote();
+addPage("legacy-leaf-local-project", "Project", '<page url="https://www.notion.so/legacy-leaf-local">Note</page>\n');
+addPage("legacy-leaf-local", "Note", "old\n", "legacy-leaf-local-project");
+const legacyLeafLocalFile = makeFile("LLM Wiki Sync Pull/Project/Note.md", "---\nnotion_page_id: \"legacy-leaf-local\"\n---\n\nlocal changed\n");
+const legacyLeafLocalApp = createApp([legacyLeafLocalFile], ["LLM Wiki Sync Pull", "LLM Wiki Sync Pull/Project"]);
+const legacyLeafLocalStore = makeStore();
+legacyLeafLocalStore.baselines[normalizePageId("legacy-leaf-local")] = makeBaseline("legacy-leaf-local", "Note", "\nold\n", "Note", "old\n");
+await runPull(legacyLeafLocalApp, legacyLeafLocalStore);
+assert.equal(legacyLeafLocalApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Project/Note.md"), legacyLeafLocalFile);
+assert.equal(legacyLeafLocalApp.vault.getAbstractFileByPath("Project/Note.md"), null);
+assert.equal(legacyLeafLocalFile.content.includes("local changed"), true);
+
+resetRemote();
 addPage("mapped-with-child", "A", 'same own body\n<page url="https://www.notion.so/mapped-with-child-child">Child</page>\n');
 addPage("mapped-with-child-child", "Child", "child\n", "mapped-with-child");
 const mappedWithChildFile = makeFile("A.md", "---\nnotion_page_id: \"mapped-with-child\"\n---\n\nsame own body\n");
@@ -520,9 +667,54 @@ const mappedWithChildApp = createApp([mappedWithChildFile]);
 const mappedWithChildStore = makeStore();
 mappedWithChildStore.baselines[normalizePageId("mapped-with-child")] = makeBaseline("mapped-with-child", "A", "\nsame own body\n", "A", "same own body\n");
 await runPull(mappedWithChildApp, mappedWithChildStore);
-assert.equal(mappedWithChildFile.content, "---\nnotion_page_id: \"mapped-with-child\"\n---\n\nsame own body\n");
+assert.equal(mappedWithChildApp.vault.getAbstractFileByPath("A.md"), null);
+const mappedWithChildIndex = mappedWithChildApp.vault.getAbstractFileByPath("A/_index.md");
+assert.ok(mappedWithChildIndex);
+assert.equal(parseFrontmatter(mappedWithChildIndex.content).notion_page_id, "mapped-with-child");
+assert.equal(parseFrontmatter(mappedWithChildIndex.content).notion_page_role, "container_index");
+assert.ok(mappedWithChildApp.vault.getAbstractFileByPath("A/Child.md"));
 assert.equal(mappedWithChildApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/A/Child.md"), null);
-assert.equal(mappedWithChildStore.baselines[normalizePageId("mapped-with-child")].syncedAt, "2026-08-22T00:00:00.000Z");
+assert.notEqual(mappedWithChildStore.baselines[normalizePageId("mapped-with-child")].syncedAt, "2026-08-22T00:00:00.000Z");
+
+resetRemote();
+addPage("rollback-container", "Rollback", 'body\n<page url="https://www.notion.so/rollback-child">Child</page>\n');
+addPage("rollback-child", "Child", "child\n", "rollback-container");
+const rollbackFile = makeFile("LLM Wiki Sync Pull/Rollback.md", "---\nnotion_page_id: \"rollback-container\"\n---\n\nbody\n");
+rollbackFile.failProcessOnce = true;
+const rollbackApp = createApp([rollbackFile], ["LLM Wiki Sync Pull"]);
+const rollbackStore = makeStore();
+rollbackStore.baselines[normalizePageId("rollback-container")] = makeBaseline("rollback-container", "Rollback", "\nbody\n", "Rollback", "body\n");
+await runPull(rollbackApp, rollbackStore);
+assert.equal(rollbackApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Rollback.md"), rollbackFile);
+assert.equal(rollbackApp.vault.getAbstractFileByPath("Rollback/_index.md"), null);
+assert.equal(rollbackFile.content, "---\nnotion_page_id: \"rollback-container\"\n---\n\nbody\n");
+assert.equal(rollbackStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Rollback")], undefined);
+assert.equal(rollbackStore.baselines[normalizePageId("rollback-container")].syncedAt, "2026-08-22T00:00:00.000Z");
+
+resetRemote();
+addPage("body-removal", "Body Removal", 'hello\n<page url="https://www.notion.so/body-removal-child">Child</page>\n');
+addPage("body-removal-child", "Child", "child\n", "body-removal");
+const bodyRemovalApp = createApp();
+const bodyRemovalStore = makeStore();
+await runPull(bodyRemovalApp, bodyRemovalStore);
+const bodyRemovalIndex = bodyRemovalApp.vault.getAbstractFileByPath("Body Removal/_index.md");
+assert.ok(bodyRemovalIndex);
+assert.equal(bodyRemovalIndex.content.includes("hello"), true);
+pages.get("body-removal").markdown = '<page url="https://www.notion.so/body-removal-child">Child</page>\n';
+pages.get("body-removal").lastEditedTime = new Date(Date.now() + 1000).toISOString();
+await runPull(bodyRemovalApp, bodyRemovalStore);
+assert.equal(bodyRemovalIndex.content.includes("hello"), false);
+
+resetRemote();
+addPage("unmatched-page-ref", "Unmatched Page Ref", 'keep\n<page url="https://www.notion.so/not-a-child">Not A Child</page>\n<page url="https://www.notion.so/actual-child">Actual Child</page>\n');
+addPage("actual-child", "Actual Child", "child\n", "unmatched-page-ref");
+const unmatchedRefApp = createApp();
+const unmatchedRefStore = makeStore();
+await runPull(unmatchedRefApp, unmatchedRefStore);
+const unmatchedRefIndex = unmatchedRefApp.vault.getAbstractFileByPath("Unmatched Page Ref/_index.md");
+assert.ok(unmatchedRefIndex);
+assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/not-a-child">Not A Child</page>'), true);
+assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/actual-child">Actual Child</page>'), false);
 
 resetRemote();
 addPage("local-only", "Local Only", "old\n");
@@ -544,19 +736,19 @@ assert.equal(conflictFile.content.includes("local changed"), true);
 
 resetRemote();
 addPage("collision-note", "Collision", "remote\n");
-const collisionApp = createApp([makeFile("LLM Wiki Sync Pull/Collision.md", "existing\n")], ["LLM Wiki Sync Pull"]);
+const collisionApp = createApp([makeFile("Collision.md", "existing\n")]);
 const collisionStore = makeStore();
 await runPull(collisionApp, collisionStore);
-assert.equal(collisionApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Collision.md").content, "existing\n");
+assert.equal(collisionApp.vault.getAbstractFileByPath("Collision.md").content, "existing\n");
 
 resetRemote();
 addPage("blocked-folder", "Blocked", "");
 addPage("blocked-child", "Child", "child\n", "blocked-folder");
-const blockedApp = createApp([makeFile("LLM Wiki Sync Pull/Blocked", "file collision\n")], ["LLM Wiki Sync Pull"]);
+const blockedApp = createApp([makeFile("Blocked", "file collision\n")]);
 const blockedStore = makeStore();
 await runPull(blockedApp, blockedStore);
-assert.equal(blockedApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/Blocked/Child.md"), null);
-assert.equal(blockedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "LLM Wiki Sync Pull/Blocked")], undefined);
+assert.equal(blockedApp.vault.getAbstractFileByPath("Blocked/Child.md"), null);
+assert.equal(blockedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Blocked")], undefined);
 assert.equal(forbiddenRequests.length, 0);
 
 resetRemote();
