@@ -66,7 +66,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.2";
+const VERSION_LABEL = "v0.8.3";
 
 interface SyncRunState {
   type: string | null;
