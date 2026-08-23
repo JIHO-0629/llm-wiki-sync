@@ -58,6 +58,9 @@ For development or manual testing, place the plugin folder at:
 
 ```text
 <vault>/.obsidian/plugins/llm-wiki-sync
+```
+
+Then enable it from `Settings -> Community plugins`.
 
 ## Notion Setup
 
