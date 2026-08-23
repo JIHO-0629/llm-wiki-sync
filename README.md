@@ -40,15 +40,24 @@ On the next sync, LLM Wiki Sync compares the current local state against the bas
 
 ## Installation
 
-LLM Wiki Sync v0.8.2 is a development branch for review.
+LLM Wiki Sync is available in the official Obsidian Community Plugins directory.
 
-For manual installation or release-candidate testing, place the plugin folder at:
+### Community Plugins
+
+1. Open `Settings -> Community plugins`.
+2. Select `Browse`.
+3. Search for `LLM Wiki Sync`.
+4. Click `Install`.
+5. Click `Enable`.
+
+Current public release: **v0.8.2**.
+
+### Manual Installation
+
+For development or manual testing, place the plugin folder at:
 
 ```text
 <vault>/.obsidian/plugins/llm-wiki-sync
-```
-
-Then enable it from Obsidian Settings -> Community plugins.
 
 ## Notion Setup
 
