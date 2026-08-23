@@ -435,8 +435,17 @@ const legacyProjectsFile = makeFile("LLM Wiki Sync Pull/10_Projects.md", "---\nn
 const realUseApp = createApp([legacyProjectsFile], ["10_Projects", "LLM Wiki Sync Pull"]);
 const realUseStore = makeStore();
 realUseStore.baselines[normalizePageId("projects-folder")] = makeBaseline("projects-folder", "10_Projects", "\n", "10_Projects", "\n");
+realUseStore.folderMappings[mappingKey(ROOT_PAGE_ID, "10_Projects")] = {
+  notionPageId: "projects-folder",
+  lastKnownPath: "10_Projects",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
 await runPull(realUseApp, realUseStore);
+const projectsIndexFile = realUseApp.vault.getAbstractFileByPath("10_Projects/_index.md");
 const indexFile = realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/_index.md");
+assert.ok(projectsIndexFile);
+assert.equal(parseFrontmatter(projectsIndexFile.content).notion_page_id, "projects-folder");
+assert.equal(parseFrontmatter(projectsIndexFile.content).notion_page_role, "container_index");
 assert.ok(indexFile);
 assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/01_왜 시작했는가.md"));
 assert.ok(realUseApp.vault.getAbstractFileByPath("10_Projects/LLM Wiki Sync 개발 기록/02_첫 Release 전 검증과 준비.md"));
@@ -460,6 +469,55 @@ assert.deepEqual(realUseApp._files.map((file) => [file.path, file.content]), rea
 assert.deepEqual(Array.from(realUseApp._folders).sort(), realUseFolders);
 assert.equal(JSON.stringify(realUseStore.folderMappings), realUseMappings);
 assert.deepEqual(Object.keys(realUseStore.baselines).sort(), realUseBaselines);
+
+resetRemote();
+addPage("attachments-folder", "99_Attachments", '<page url="https://www.notion.so/attachment-child">Image</page>\n');
+addPage("attachment-child", "Image", "image body\n", "attachments-folder");
+const attachmentsLegacyFile = makeFile("LLM Wiki Sync Pull/99_Attachments.md", "---\nnotion_page_id: \"attachments-folder\"\n---\n\n");
+const attachmentsApp = createApp([attachmentsLegacyFile], ["99_Attachments", "LLM Wiki Sync Pull"]);
+const attachmentsStore = makeStore();
+attachmentsStore.baselines[normalizePageId("attachments-folder")] = makeBaseline("attachments-folder", "99_Attachments", "\n", "99_Attachments", "\n");
+attachmentsStore.folderMappings[mappingKey(ROOT_PAGE_ID, "99_Attachments")] = {
+  notionPageId: "attachments-folder",
+  lastKnownPath: "99_Attachments",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+await runPull(attachmentsApp, attachmentsStore);
+const attachmentsIndex = attachmentsApp.vault.getAbstractFileByPath("99_Attachments/_index.md");
+assert.ok(attachmentsIndex);
+assert.equal(parseFrontmatter(attachmentsIndex.content).notion_page_id, "attachments-folder");
+assert.equal(parseFrontmatter(attachmentsIndex.content).notion_page_role, "container_index");
+assert.ok(attachmentsApp.vault.getAbstractFileByPath("99_Attachments/Image.md"));
+assert.equal(attachmentsApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/99_Attachments.md"), null);
+assert.equal(attachmentsStore.getAllFolderMappings().filter((mapping) => normalizePageId(mapping.notionPageId) === normalizePageId("attachments-folder")).length, 1);
+assert.equal(notices.some((message) => message === "LLM Wiki Sync: Ambiguous note/folder mapping skipped."), false);
+
+resetRemote();
+addPage("systems-prompts-folder", "60_Systems-Prompts", '<page url="https://www.notion.so/rules-page">Rules</page>\n<page url="https://www.notion.so/templates-page">Templates</page>\n');
+addPage("rules-page", "Rules", "rules body\n", "systems-prompts-folder");
+addPage("templates-page", "Templates", "templates body\n", "systems-prompts-folder");
+const systemsPromptsLegacyFile = makeFile(
+  "LLM Wiki Sync Pull/60_Systems-Prompts.md",
+  "---\nnotion_page_id: \"systems-prompts-folder\"\n---\n\n<page url=\"https://www.notion.so/rules-page\">Rules</page>\n<page url=\"https://www.notion.so/templates-page\">Templates</page>\n"
+);
+const systemsPromptsApp = createApp([systemsPromptsLegacyFile], ["60_Systems-Prompts", "LLM Wiki Sync Pull"]);
+const systemsPromptsStore = makeStore();
+systemsPromptsStore.baselines[normalizePageId("systems-prompts-folder")] = makeBaseline("systems-prompts-folder", "60_Systems-Prompts", "\n", "60_Systems-Prompts", "\n");
+systemsPromptsStore.folderMappings[mappingKey(ROOT_PAGE_ID, "60_Systems-Prompts")] = {
+  notionPageId: "systems-prompts-folder",
+  lastKnownPath: "60_Systems-Prompts",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+await runPull(systemsPromptsApp, systemsPromptsStore);
+const systemsPromptsIndex = systemsPromptsApp.vault.getAbstractFileByPath("60_Systems-Prompts/_index.md");
+assert.ok(systemsPromptsIndex);
+assert.equal(parseFrontmatter(systemsPromptsIndex.content).notion_page_id, "systems-prompts-folder");
+assert.equal(parseFrontmatter(systemsPromptsIndex.content).notion_page_role, "container_index");
+assert.equal(systemsPromptsIndex.content.includes("<page "), false);
+assert.ok(systemsPromptsApp.vault.getAbstractFileByPath("60_Systems-Prompts/Rules.md"));
+assert.ok(systemsPromptsApp.vault.getAbstractFileByPath("60_Systems-Prompts/Templates.md"));
+assert.equal(systemsPromptsApp.vault.getAbstractFileByPath("LLM Wiki Sync Pull/60_Systems-Prompts.md"), null);
+assert.equal(systemsPromptsStore.getAllFolderMappings().filter((mapping) => normalizePageId(mapping.notionPageId) === normalizePageId("systems-prompts-folder")).length, 1);
 
 resetRemote();
 addPage("mapped-folder-content", "Mapped Folder", "real body\n<page url=\"https://www.notion.so/mapped-folder-content-child\">Child</page>\n");

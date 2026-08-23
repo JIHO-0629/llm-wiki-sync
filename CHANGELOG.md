@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.5
+
+- Fixed legacy dual note/folder mappings that caused valid Notion container hierarchies to be skipped as ambiguous during Pull.
+
 ## 0.8.4
 
 - Added Notion -> Obsidian vault-root hierarchy reconciliation.
