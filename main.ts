@@ -185,7 +185,7 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       id: "pull-pages-from-notion",
       name: "Pull from Notion",
       callback: () => {
-        void this.pullPagesFromNotion();
+        void this.runExclusiveSync("pull-pages-from-notion", "Notion Pull", () => this.pullPagesFromNotion());
       }
     });
 
@@ -502,7 +502,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       app: this.app,
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this
+      baselineStore: this,
+      store: this
     });
   }
 
