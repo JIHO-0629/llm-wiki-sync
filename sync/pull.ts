@@ -12,6 +12,8 @@ import {
   type RemoteSyncSnapshot,
   type SyncBaselineStore
 } from "./baseline";
+import { areObsidianAndNotionBodiesEquivalent, assertSuccessfulConversion, prepareObsidianMarkdownFromNotion } from "./markdownConversion";
+import { prepareObsidianMarkdownWithPulledImages } from "./mediaPull";
 import {
   createFrontmatterForNotionPage,
   CONTAINER_INDEX_ROLE,
@@ -117,14 +119,19 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
         const pageDetails = await client.getPageDetails(childPage.id);
         const rawTitle = pageDetails.title || childPage.title;
         const pageMarkdown = await client.retrievePageMarkdown(childPage.id);
-        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
-        const cleanMarkdown = normalizePulledMarkdown(pageMarkdown.markdown);
-        const ownMarkdown = normalizePulledMarkdown(stripDirectChildPageReferences(pageMarkdown.markdown, childPage.directChildren));
-        const ownRemoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, { ...pageMarkdown, markdown: ownMarkdown });
         if (pageMarkdown.truncated) {
           console.warn(`${pageLog} Notion content truncated:`, pageMarkdown.unknownBlockIds);
-          new Notice("LLM Wiki Sync: Warning - Notion page content was truncated");
+          new Notice("LLM Wiki Sync: Truncated Notion content skipped; no local write or baseline update was made.");
+          counts.skipped += 1;
+          continue;
         }
+        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
+        const rawOwnMarkdown = normalizePulledMarkdown(stripDirectChildPageReferences(pageMarkdown.markdown, childPage.directChildren));
+        const ownRemoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, { ...pageMarkdown, markdown: rawOwnMarkdown });
+        // Container bodies must use the child-reference-stripped representation; <page> is hierarchy transport, never note content.
+        const cleanSourceMarkdown = childPage.hasChildren ? rawOwnMarkdown : normalizePulledMarkdown(pageMarkdown.markdown);
+        const cleanMarkdown = await prepareObsidianMarkdownWithPulledImages(options.app, cleanSourceMarkdown, (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
+        const ownMarkdown = await prepareObsidianMarkdownWithPulledImages(options.app, rawOwnMarkdown, (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
 
         const storedFolderPath = getStoredFolderPathForRemotePage(store, childPage.id, normalizedRootPageId);
         if (storedFolderPath.status === "ambiguous") {
@@ -205,7 +212,7 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
             console.warn(`${pageLog} skipped: stored folder mapping path is blocked`, folderPath);
             continue;
           }
-          if (normalizeVaultFolderPath(storedFolderPath.folderPath) !== normalizeVaultFolderPath(folderPath)) {
+          if (store && normalizeVaultFolderPath(storedFolderPath.folderPath) !== normalizeVaultFolderPath(folderPath)) {
             await migrateLegacyPullFolderMappingAfterSafePath(store, normalizedRootPageId, storedFolderPath.folderPath, folderPath, childPage.id);
           }
           const persistResult = await persistFolderMappingIfPossible(store, normalizedRootPageId, folderPath, childPage.id);
@@ -752,6 +759,7 @@ async function migrateMappedNoteToContainerIndex(options: {
     console.error(`${options.pageLog} mapped-note migration rollback after failure`, getErrorMessage(error));
     if (movedFile) {
       try {
+        // Rollback is byte-exact by design: originalContent must bypass every converter and normalizer.
         await options.app.vault.process(movedFile, () => originalContent);
         if (!options.app.vault.getAbstractFileByPath(originalPath)) {
           await options.app.fileManager.renameFile(movedFile, originalPath);
@@ -776,8 +784,7 @@ async function hasOnlyStructuralLegacyLocalChanges(options: {
   const markdown = await options.app.vault.read(options.mappedFile);
   const body = removeNotionPageMappingFromMarkdown(markdown);
   const localOwnBody = normalizeSyncBody(normalizePulledMarkdown(stripDirectChildPageReferences(body, options.directChildren)));
-  const remoteOwnBody = normalizeSyncBody(options.ownMarkdown);
-  return localOwnBody === remoteOwnBody;
+  return areObsidianAndNotionBodiesEquivalent(localOwnBody, options.ownMarkdown);
 }
 
 function createFrontmatterForContainerIndex(pageId: string): string {
@@ -895,7 +902,6 @@ function getExpectedMappedFolderPath(
   storedFolderPath: string,
   rawTitle: string
 ): string {
-  const normalizedStoredFolderPath = normalizeVaultFolderPath(storedFolderPath);
   const expectedParentPath = normalizeNotionPageId(childPage.parentPageId) !== normalizeNotionPageId(rootPageId)
     ? parentFolderPath
     : "";

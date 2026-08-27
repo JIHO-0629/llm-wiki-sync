@@ -770,9 +770,7 @@ const unmatchedRefApp = createApp();
 const unmatchedRefStore = makeStore();
 await runPull(unmatchedRefApp, unmatchedRefStore);
 const unmatchedRefIndex = unmatchedRefApp.vault.getAbstractFileByPath("Unmatched Page Ref/_index.md");
-assert.ok(unmatchedRefIndex);
-assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/not-a-child">Not A Child</page>'), true);
-assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/actual-child">Actual Child</page>'), false);
+assert.equal(unmatchedRefIndex, null);
 
 resetRemote();
 addPage("local-only", "Local Only", "old\n");

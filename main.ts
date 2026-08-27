@@ -8,7 +8,7 @@
   Setting,
   type TFile
 } from "obsidian";
-import { extractNotionPageId, NotionApiError, NotionClient } from "./notionClient";
+import { extractNotionPageId, NotionApiError, NotionClient, NOTION_VERSION } from "./notionClient";
 import { pushCurrentFolderToNotion, pushEntireVaultToNotion, type FolderMapping } from "./sync/bulkPush";
 import { pullPagesFromNotion } from "./sync/pull";
 import { pushCurrentNoteToNotion } from "./sync/push";
@@ -39,8 +39,12 @@ import {
   type SyncBaseline,
   type SyncBaselineStore
 } from "./sync/baseline";
-import { normalizeNotionPageId } from "./sync/mapping";
+import { getNotionPageMapping, normalizeNotionPageId, removeNotionPageMappingFromMarkdown } from "./sync/mapping";
 import { SyncExecutionLock } from "./sync/runLock";
+import { runMediaCapabilityProbe } from "./sync/mediaCapabilityProbe";
+import { runMediaWriteBoundaryProbe } from "./sync/mediaWriteBoundaryProbe";
+import { runMediaRecoveryProbe } from "./sync/mediaRecoveryProbe";
+import { createMediaPushDryRun } from "./sync/mediaPush";
 
 interface LlmWikiSyncSettings {
   notionRootPageUrl: string;
@@ -66,19 +70,48 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.5";
+const VERSION_LABEL = "v0.9.0";
 
 interface SyncRunState {
   type: string | null;
   scope: string | null;
-  progressModal: SyncProgressModal | null;
+  progressModal: Modal | null;
   cancelToken: SyncCancelToken | null;
+}
+
+interface FolderScopeOption {
+  id: "current-folder" | "choose-folder" | "entire-vault";
+  label: string;
+  description: string;
+}
+
+interface AdvancedToolOption {
+  id:
+    | "test-notion-connection"
+    | "run-grammar-probe"
+    | "run-media-capability-probe"
+    | "run-media-write-boundary-probe"
+    | "run-media-recovery-probe"
+    | "run-media-push-dry-run"
+    | "push-current-folder"
+    | "push-entire-vault"
+    | "audit-current-folder"
+    | "audit-entire-vault"
+    | "initialize-current-folder"
+    | "initialize-entire-vault"
+    | "initialize-sync-baseline"
+    | "debug-active-mapping"
+    | "resolve-conflict-keep-obsidian"
+    | "resolve-conflict-keep-notion";
+  label: string;
+  description: string;
 }
 
 export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineStore, FolderSyncStore {
   settings: LlmWikiSyncSettings = DEFAULT_SETTINGS;
   private originalConsoleDebug: typeof console.debug | null = null;
   private syncExecutionLock = new SyncExecutionLock();
+  private statusBarItem: HTMLElement | null = null;
   private syncRunState: SyncRunState = {
     type: null,
     scope: null,
@@ -89,137 +122,79 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.5 loaded");
+    console.debug("[LLM Wiki Sync] v0.9.0 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
 
     this.addCommand({
-      id: "test-notion-connection",
-      name: "Test Notion connection",
-      callback: () => {
-        void this.testNotionConnection();
-      }
-    });
-
-    this.addCommand({
-      id: "push-current-note-to-notion",
-      name: "Push to Notion",
-      callback: () => {
-        void this.runExclusiveSync("push-current-note", "Current note", () => this.pushCurrentNoteToNotion());
-      }
-    });
-
-    this.addCommand({
       id: "sync-current-note",
-      name: "Sync current note",
+      name: "LLM Wiki Sync: Sync current note",
       callback: () => {
         void this.syncCurrentNote();
       }
     });
 
     this.addCommand({
-      id: "push-current-folder-to-notion",
-      name: "LLM Wiki Sync: Push current folder to Notion",
+      id: "run-media-capability-probe",
+      name: "LLM Wiki Sync: Run media capability probe (Advanced)",
       callback: () => {
-        void this.runExclusiveSync("push-current-folder", "Current folder", () => this.pushCurrentFolderToNotion());
+        void this.runMediaCapabilityProbe();
       }
     });
 
     this.addCommand({
-      id: "push-entire-vault-to-notion",
-      name: "LLM Wiki Sync: Push entire vault to Notion",
+      id: "run-media-write-boundary-probe",
+      name: "LLM Wiki Sync: Run media write-boundary probe (Advanced)",
       callback: () => {
-        this.confirmPushEntireVaultToNotion();
+        void this.runMediaWriteBoundaryProbe();
       }
     });
 
     this.addCommand({
-      id: "sync-folder-with-notion",
-      name: "LLM Wiki Sync: Sync folder with Notion",
+      id: "run-media-recovery-probe",
+      name: "LLM Wiki Sync: Run media recovery probe (Advanced)",
       callback: () => {
-        this.openFolderSyncPicker();
+        void this.runMediaRecoveryProbe();
       }
     });
 
     this.addCommand({
-      id: "sync-entire-vault-with-notion",
-      name: "LLM Wiki Sync: Sync entire vault with Notion",
+      id: "run-media-push-dry-run",
+      name: "LLM Wiki Sync: Run media Push dry-run (Advanced)",
       callback: () => {
-        void this.syncFolderWithNotion("");
+        void this.runMediaPushDryRun();
       }
     });
 
     this.addCommand({
-      id: "audit-current-folder-hierarchy",
-      name: "LLM Wiki Sync: Audit current folder hierarchy",
+      id: "push-current-note-to-notion",
+      name: "LLM Wiki Sync: Push current note to Notion",
       callback: () => {
-        void this.runExclusiveSync("audit-current-folder", "Current folder", () => this.auditWorkspaceHierarchy("current-folder"));
-      }
-    });
-
-    this.addCommand({
-      id: "audit-entire-vault-hierarchy",
-      name: "LLM Wiki Sync: Audit entire vault hierarchy",
-      callback: () => {
-        void this.runExclusiveSync("audit-entire-vault", "Vault root", () => this.auditWorkspaceHierarchy("entire-vault"));
-      }
-    });
-
-    this.addCommand({
-      id: "initialize-current-folder-mappings",
-      name: "LLM Wiki Sync: Initialize current folder mappings",
-      callback: () => {
-        void this.runExclusiveSync("initialize-current-folder", "Current folder", () => this.initializeWorkspaceMappings("current-folder"));
-      }
-    });
-
-    this.addCommand({
-      id: "initialize-entire-vault-mappings",
-      name: "LLM Wiki Sync: Initialize entire vault mappings",
-      callback: () => {
-        void this.runExclusiveSync("initialize-entire-vault", "Vault root", () => this.initializeWorkspaceMappings("entire-vault"));
+        void this.pushCurrentNoteToNotion();
       }
     });
 
     this.addCommand({
       id: "pull-pages-from-notion",
-      name: "Pull from Notion",
+      name: "LLM Wiki Sync: Pull from Notion",
       callback: () => {
-        void this.runExclusiveSync("pull-pages-from-notion", "Notion Pull", () => this.pullPagesFromNotion());
+        void this.pullPagesFromNotion();
       }
     });
 
     this.addCommand({
-      id: "debug-active-mapping",
-      name: "Debug active mapping",
-      callback: () => { void debugActiveMapping(this.app, this.getNotionToken(), this); }
-    });
-
-    this.addCommand({
-      id: "debug-sync-state",
-      name: "Debug sync state",
-      callback: () => { void debugActiveMapping(this.app, this.getNotionToken(), this); }
-    });
-
-    this.addCommand({
-      id: "initialize-sync-baseline",
-      name: "Initialize sync baseline",
-      callback: () => { void initializeSyncBaseline(this.app, this.getNotionToken(), this); }
-    });
-
-    this.addCommand({
-      id: "resolve-conflict-keep-obsidian",
-      name: "Resolve conflict — Keep Obsidian",
+      id: "sync-folder-or-vault-with-notion",
+      name: "LLM Wiki Sync: Sync folder or vault...",
       callback: () => {
-        void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_OBSIDIAN" });
+        this.openFolderScopePicker();
       }
     });
 
     this.addCommand({
-      id: "resolve-conflict-keep-notion",
-      name: "Resolve conflict — Keep Notion",
+      id: "advanced-tools",
+      name: "LLM Wiki Sync: Advanced tools...",
       callback: () => {
-        void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_NOTION" });
+        this.openAdvancedToolsPicker();
       }
     });
 
@@ -227,12 +202,12 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
       void this.syncCurrentNote();
     });
 
-    this.addRibbonIcon("arrow-up-circle", "LLM Wiki Sync: Keep Obsidian version", () => {
-      void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_OBSIDIAN" });
+    this.addRibbonIcon("arrow-up-circle", "LLM Wiki Sync: Push current note to Notion", () => {
+      void this.pushCurrentNoteToNotion();
     });
 
-    this.addRibbonIcon("arrow-down-circle", "LLM Wiki Sync: Keep Notion version", () => {
-      void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_NOTION" });
+    this.addRibbonIcon("arrow-down-circle", "LLM Wiki Sync: Pull from Notion", () => {
+      void this.pullPagesFromNotion();
     });
 
     this.addPrimaryStatusBarActions();
@@ -372,31 +347,8 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   }
 
   private addPrimaryStatusBarActions(): void {
-    const item = this.addStatusBarItem();
-    item.setText("LLM Wiki Sync: ");
-    this.addStatusBarAction(item, "Sync", () => {
-      void syncCurrentNote({
-        app: this.app,
-        token: this.getNotionToken(),
-        rootPageUrl: this.settings.notionRootPageUrl,
-        baselineStore: this,
-        resolveParentPageId: this.resolveParentPageIdForFile
-      });
-    });
-    item.appendText(" · ");
-    this.addStatusBarAction(item, "Keep Obsidian", () => {
-      void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_OBSIDIAN" });
-    });
-    item.appendText(" · ");
-    this.addStatusBarAction(item, "Keep Notion", () => {
-      void resolveConflict({ app: this.app, token: this.getNotionToken(), baselineStore: this, strategy: "KEEP_NOTION" });
-    });
-  }
-
-  private addStatusBarAction(parent: HTMLElement, label: string, callback: () => void): void {
-    const action = parent.createSpan({ text: label });
-    action.addClass("llm-wiki-sync-status-action");
-    action.addEventListener("click", callback);
+    this.statusBarItem = this.addStatusBarItem();
+    this.updateStatusBar();
   }
 
   configureDebugLogging(): void {
@@ -473,13 +425,165 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   }
 
   async pushCurrentNoteToNotion(): Promise<void> {
-    await pushCurrentNoteToNotion({
+    await this.executeSyncAction(
+      "push-current-note",
+      "Current note",
+      "Pushing current note to Notion...",
+      () => pushCurrentNoteToNotion({
+        app: this.app,
+        token: this.getNotionToken(),
+        rootPageUrl: this.settings.notionRootPageUrl,
+        baselineStore: this,
+        resolveParentPageId: this.resolveParentPageIdForFile
+      })
+    );
+  }
+
+  async runNotionGrammarProbe(): Promise<void> {
+    const token = this.getNotionToken().trim();
+    const parentPageId = extractNotionPageId(this.settings.notionRootPageUrl.trim());
+    if (!token || !parentPageId) {
+      new Notice("LLM Wiki Sync: Missing Notion configuration.");
+      return;
+    }
+
+    const probeMarkdown = [
+      "# LLM Wiki Sync grammar probe",
+      "",
+      "Inline math A: $x^2$",
+      "Inline math B: $`x^2`$",
+      "",
+      "Display math:",
+      "$$",
+      "E = mc^2",
+      "$$",
+      "",
+      "> Multi-line quote first line",
+      "> second line",
+      "",
+      "- Parent item",
+      "\t- Nested item",
+      "\t\t- Deep item",
+      "",
+      "<callout icon=\"⚠️\" color=\"yellow_bg\">",
+      "\tKnown callout",
+      "</callout>",
+      "",
+      "<callout>",
+      "Attribute-free callout",
+      "</callout>",
+      "",
+      "<table header-row=\"true\">",
+      "<tr><td>Header</td><td>Value</td></tr>",
+      "<tr><td>One</td><td>Two</td></tr>",
+      "</table>"
+    ].join("\n");
+
+    try {
+      const client = new NotionClient({ token });
+      const page = await client.createChildPage({
+        parentPageId,
+        title: `LLM Wiki Sync Grammar Probe ${new Date().toISOString()}`,
+        markdown: probeMarkdown,
+        pushedAt: new Date()
+      });
+      const pulled = await client.retrievePageMarkdown(page.id);
+      const report = [
+        "# LLM Wiki Sync Notion Grammar Probe",
+        "",
+        `Page: ${page.url}`,
+        `Notion API version: ${NOTION_VERSION}`,
+        `Truncated: ${pulled.truncated}`,
+        `Unknown block IDs: ${pulled.unknownBlockIds.join(", ") || "none"}`,
+        "",
+        "## Outbound probe markdown",
+        "",
+        "```md",
+        probeMarkdown,
+        "```",
+        "",
+        "## Raw response markdown",
+        "",
+        "```md",
+        pulled.markdown,
+        "```",
+        ""
+      ].join("\n");
+      const reportPath = `.obsidian/plugins/${this.manifest.id}/grammar-probe.md`;
+      await this.app.vault.adapter.write(reportPath, report);
+      new Notice("LLM Wiki Sync: Grammar probe complete. Raw result saved in the plugin folder.");
+    } catch (error) {
+      console.error("LLM Wiki Sync: Grammar probe failed", getErrorMessage(error));
+      new Notice("LLM Wiki Sync: Grammar probe failed. Check the developer console.");
+    }
+  }
+
+  async runMediaCapabilityProbe(): Promise<void> {
+    await runMediaCapabilityProbe({
       app: this.app,
       token: this.getNotionToken(),
       rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this,
-      resolveParentPageId: this.resolveParentPageIdForFile
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
     });
+  }
+
+  async runMediaWriteBoundaryProbe(): Promise<void> {
+    await runMediaWriteBoundaryProbe({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
+    });
+  }
+
+  async runMediaRecoveryProbe(): Promise<void> {
+    await runMediaRecoveryProbe({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
+    });
+  }
+
+  async runMediaPushDryRun(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") {
+      new Notice("LLM Wiki Sync: Open a Markdown note first.");
+      return;
+    }
+    try {
+      const markdown = await this.app.vault.read(file);
+      const mapping = await getNotionPageMapping(this.app, file);
+      let remoteBody: string | undefined;
+      if (mapping.hasMapping) {
+        if (!mapping.pageId) throw new Error("The active note has an empty notion_page_id.");
+        remoteBody = (await new NotionClient({ token: this.getNotionToken() }).retrievePageMarkdown(mapping.pageId)).markdown;
+      }
+      const plan = await createMediaPushDryRun({
+        app: this.app,
+        file,
+        localBody: removeNotionPageMappingFromMarkdown(markdown),
+        remoteBody,
+        baselineImages: mapping.pageId ? this.getSyncBaseline(mapping.pageId)?.images ?? [] : []
+      });
+      const report = [
+        "# LLM Wiki Sync Media Push Dry Run",
+        "",
+        `Note: ${file.path}`,
+        `Mapped Notion page: ${mapping.pageId ?? "none (new page plan)"}`,
+        "",
+        "```json",
+        JSON.stringify(plan, null, 2),
+        "```",
+        ""
+      ].join("\n");
+      const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+      await this.app.vault.adapter.write(`${pluginDir}/media-push-dry-run.md`, report);
+      new Notice("LLM Wiki Sync: Media Push dry-run complete. No remote changes were made.");
+    } catch (error) {
+      console.error("LLM Wiki Sync: Media Push dry-run failed", error);
+      new Notice(`LLM Wiki Sync: Media Push dry-run failed: ${getErrorMessage(error)}`);
+    }
   }
 
   resolveParentPageIdForFile = async (file: TFile): Promise<string | null> => {
@@ -494,23 +598,33 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   };
 
   async syncCurrentNote(): Promise<void> {
-    await this.runExclusiveSync("sync-current-note", "Current note", () => syncCurrentNote({
-      app: this.app,
-      token: this.getNotionToken(),
-      rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this,
-      resolveParentPageId: this.resolveParentPageIdForFile
-    }));
+    await this.executeSyncAction(
+      "sync-current-note",
+      "Current note",
+      "Syncing current note...",
+      () => syncCurrentNote({
+        app: this.app,
+        token: this.getNotionToken(),
+        rootPageUrl: this.settings.notionRootPageUrl,
+        baselineStore: this,
+        resolveParentPageId: this.resolveParentPageIdForFile
+      })
+    );
   }
 
   async pullPagesFromNotion(): Promise<void> {
-    await pullPagesFromNotion({
-      app: this.app,
-      token: this.getNotionToken(),
-      rootPageUrl: this.settings.notionRootPageUrl,
-      baselineStore: this,
-      store: this
-    });
+    await this.executeSyncAction(
+      "pull-pages-from-notion",
+      "Notion Pull",
+      "Pulling from Notion...",
+      () => pullPagesFromNotion({
+        app: this.app,
+        token: this.getNotionToken(),
+        rootPageUrl: this.settings.notionRootPageUrl,
+        baselineStore: this,
+        store: this
+      })
+    );
   }
 
   async pushCurrentFolderToNotion(): Promise<void> {
@@ -544,6 +658,39 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     new FolderSyncPickerModal(this).open();
   }
 
+  openFolderScopePicker(): void {
+    new FolderScopePickerModal(this).open();
+  }
+
+  openAdvancedToolsPicker(): void {
+    new AdvancedToolsModal(this).open();
+  }
+
+  getCurrentFolderPath(): string | null {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      return null;
+    }
+    const folderPath = activeFile?.parent?.path ?? "";
+    return folderPath === "/" ? "" : folderPath;
+  }
+
+  private async executeSyncAction(type: string, scope: string, message: string, run: () => Promise<void>): Promise<void> {
+    await this.runExclusiveSync(type, scope, async () => {
+      const progressModal = new OperationProgressModal(this.app, message);
+      this.syncRunState.progressModal = progressModal;
+      progressModal.open();
+      try {
+        await run();
+        progressModal.complete();
+        window.setTimeout(() => progressModal.close(), 1200);
+      } catch (error) {
+        progressModal.fail(getErrorMessage(error));
+        throw error;
+      }
+    });
+  }
+
   async syncFolderWithNotion(folderPath: string): Promise<void> {
     await this.runExclusiveSync(folderPath ? "sync-folder" : "sync-entire-vault", folderPath || "Vault root", async () => {
       const cancelToken: SyncCancelToken = { cancelRequested: false };
@@ -560,7 +707,10 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
         cancelToken,
         showResultModal: false,
         verboseDebugLogging: this.settings.verboseDebugLogging,
-        onProgress: (progress) => progressModal.update(progress)
+        onProgress: (progress) => {
+          progressModal.update(progress);
+          this.updateStatusBar(progress);
+        }
       });
     });
   }
@@ -621,18 +771,103 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     const result = await this.syncExecutionLock.run(type, scope, async () => {
       this.syncRunState.type = type;
       this.syncRunState.scope = scope;
+      this.updateStatusBar();
       try {
         await run();
       } finally {
         this.syncRunState.type = null;
         this.syncRunState.scope = null;
         this.syncRunState.cancelToken = null;
+        this.syncRunState.progressModal = null;
+        window.setTimeout(() => this.updateStatusBar(), 0);
       }
     });
     if (!result.started) {
       new Notice("LLM Wiki Sync: A sync is already running.");
       this.syncRunState.progressModal?.open();
     }
+  }
+
+  private updateStatusBar(progress?: SyncProgress): void {
+    if (!this.statusBarItem) {
+      return;
+    }
+    if (!this.isSyncRunning()) {
+      this.statusBarItem.setText("");
+      return;
+    }
+    if (progress?.total !== undefined && progress.total > 0) {
+      this.statusBarItem.setText(`LLM Wiki Sync · ${progress.processed ?? 0}/${progress.total}`);
+      return;
+    }
+    this.statusBarItem.setText(`LLM Wiki Sync · ${this.syncRunState.scope ?? "Syncing"}...`);
+  }
+}
+
+class OperationProgressModal extends Modal {
+  private readonly message: string;
+  private readonly startedAt = Date.now();
+  private timerId: number | null = null;
+  private state: "running" | "complete" | "failed" = "running";
+  private errorMessage = "";
+
+  constructor(app: App, message: string) {
+    super(app);
+    this.message = message;
+  }
+
+  onOpen(): void {
+    this.render();
+    if (this.timerId === null) {
+      this.timerId = window.setInterval(() => this.render(), 1000);
+    }
+  }
+
+  onClose(): void {
+    if (this.timerId !== null) {
+      window.clearInterval(this.timerId);
+      this.timerId = null;
+    }
+    this.contentEl.empty();
+  }
+
+  complete(): void {
+    this.state = "complete";
+    this.render();
+  }
+
+  fail(message: string): void {
+    this.state = "failed";
+    this.errorMessage = message;
+    this.render();
+  }
+
+  private render(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+
+    const elapsedMs = Date.now() - this.startedAt;
+    const title = this.state === "complete" ? "LLM Wiki Sync complete" : this.state === "failed" ? "LLM Wiki Sync failed" : "LLM Wiki Sync";
+    new Setting(contentEl)
+      .setName(title)
+      .setHeading();
+
+    contentEl.createEl("p", { text: this.state === "running" ? this.message : this.state === "complete" ? `Completed in ${formatDuration(elapsedMs)}` : "Operation failed." });
+    if (this.state === "running") {
+      contentEl.createEl("p", { text: `Elapsed ${formatClock(elapsedMs)}` });
+      contentEl.createEl("p", { text: "Please keep Obsidian open." });
+      return;
+    }
+
+    if (this.errorMessage) {
+      contentEl.createEl("p", { text: this.errorMessage });
+    }
+    new Setting(contentEl)
+      .addButton((button) => {
+        button
+          .setButtonText("Close")
+          .onClick(() => this.close());
+      });
   }
 }
 
@@ -744,7 +979,7 @@ function getPhaseName(phase: SyncProgress["phase"]): string {
 
 function formatProgressCounters(summary?: Partial<import("./sync/folderSync").FolderSyncSummary>): string {
   if (!summary) {
-    return "Created 0 · Updated 0 · Moved 0 · Conflicts 0 · Ambiguous 0 · Failed 0";
+    return "Created 0 · Updated 0 · Moved 0 · Conflicts 0 · Ambiguous 0 · Unsupported 0 · Failed 0";
   }
   return [
     `Created ${summary.created ?? 0}`,
@@ -755,6 +990,7 @@ function formatProgressCounters(summary?: Partial<import("./sync/folderSync").Fo
     `Remote changed ${summary.remoteChanged ?? 0}`,
     `Conflicts ${summary.conflicts ?? 0}`,
     `Ambiguous ${summary.ambiguous ?? 0}`,
+    `Unsupported ${summary.unsupported ?? 0}`,
     `Failed ${summary.failed ?? 0}`
   ].join(" · ");
 }
@@ -815,6 +1051,58 @@ class PushEntireVaultModal extends Modal {
   }
 }
 
+class FolderScopePickerModal extends FuzzySuggestModal<FolderScopeOption> {
+  private plugin: LlmWikiSyncPlugin;
+  private options: FolderScopeOption[] = [
+    {
+      id: "current-folder",
+      label: "Current folder",
+      description: "Sync the folder containing the active note."
+    },
+    {
+      id: "choose-folder",
+      label: "Choose folder...",
+      description: "Pick a folder from this vault."
+    },
+    {
+      id: "entire-vault",
+      label: "Entire vault",
+      description: "Sync every supported Markdown note in the vault."
+    }
+  ];
+
+  constructor(plugin: LlmWikiSyncPlugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.setPlaceholder("Choose sync scope");
+  }
+
+  getItems(): FolderScopeOption[] {
+    return this.options;
+  }
+
+  getItemText(option: FolderScopeOption): string {
+    return `${option.label} - ${option.description}`;
+  }
+
+  onChooseItem(option: FolderScopeOption): void {
+    if (option.id === "choose-folder") {
+      this.plugin.openFolderSyncPicker();
+      return;
+    }
+    if (option.id === "entire-vault") {
+      void this.plugin.syncFolderWithNotion("");
+      return;
+    }
+    const folderPath = this.plugin.getCurrentFolderPath();
+    if (folderPath === null) {
+      new Notice("LLM Wiki Sync: No active note for current folder sync.");
+      return;
+    }
+    void this.plugin.syncFolderWithNotion(folderPath);
+  }
+}
+
 class FolderSyncPickerModal extends FuzzySuggestModal<string> {
   private plugin: LlmWikiSyncPlugin;
   private folders: string[];
@@ -836,6 +1124,170 @@ class FolderSyncPickerModal extends FuzzySuggestModal<string> {
 
   onChooseItem(folderPath: string): void {
     void this.plugin.syncFolderWithNotion(folderPath);
+  }
+}
+
+class AdvancedToolsModal extends FuzzySuggestModal<AdvancedToolOption> {
+  private plugin: LlmWikiSyncPlugin;
+  private options: AdvancedToolOption[] = [
+    {
+      id: "test-notion-connection",
+      label: "Test Notion connection",
+      description: "Check the saved Notion API token and root page."
+    },
+    {
+      id: "run-grammar-probe",
+      label: "Run Notion grammar probe",
+      description: "Create and retrieve a disposable Markdown probe under the configured root page."
+    },
+    {
+      id: "run-media-capability-probe",
+      label: "Run media capability probe",
+      description: "Verify the Notion file-upload API and save its raw response."
+    },
+    {
+      id: "run-media-write-boundary-probe",
+      label: "Run media write-boundary probe",
+      description: "Verify targeted Markdown updates preserve an attached image block."
+    },
+    {
+      id: "run-media-recovery-probe",
+      label: "Run media recovery probe",
+      description: "Test whether an existing Notion image can be recovered as a reusable File Upload."
+    },
+    {
+      id: "run-media-push-dry-run",
+      label: "Run media Push dry-run",
+      description: "Plan and validate image Push without changing Notion or sync state."
+    },
+    {
+      id: "push-current-folder",
+      label: "Push current folder to Notion",
+      description: "Legacy one-way folder push."
+    },
+    {
+      id: "push-entire-vault",
+      label: "Push entire vault to Notion",
+      description: "Legacy one-way vault push with confirmation."
+    },
+    {
+      id: "audit-current-folder",
+      label: "Audit current folder hierarchy",
+      description: "Read-only hierarchy check for the active folder."
+    },
+    {
+      id: "audit-entire-vault",
+      label: "Audit entire vault hierarchy",
+      description: "Read-only hierarchy check for the vault."
+    },
+    {
+      id: "initialize-current-folder",
+      label: "Initialize current folder mappings",
+      description: "Initialize missing baselines for the active folder."
+    },
+    {
+      id: "initialize-entire-vault",
+      label: "Initialize entire vault mappings",
+      description: "Initialize missing baselines for the vault."
+    },
+    {
+      id: "initialize-sync-baseline",
+      label: "Initialize sync baseline",
+      description: "Initialize the active note baseline."
+    },
+    {
+      id: "debug-active-mapping",
+      label: "Debug active mapping",
+      description: "Inspect the active note mapping and sync state."
+    },
+    {
+      id: "resolve-conflict-keep-obsidian",
+      label: "Resolve conflict - Keep Obsidian",
+      description: "Use the Obsidian version for the active conflict."
+    },
+    {
+      id: "resolve-conflict-keep-notion",
+      label: "Resolve conflict - Keep Notion",
+      description: "Use the Notion version for the active conflict."
+    }
+  ];
+
+  constructor(plugin: LlmWikiSyncPlugin) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.setPlaceholder("Choose an advanced LLM Wiki Sync tool");
+  }
+
+  getItems(): AdvancedToolOption[] {
+    return this.options;
+  }
+
+  getItemText(option: AdvancedToolOption): string {
+    return `${option.label} - ${option.description}`;
+  }
+
+  onChooseItem(option: AdvancedToolOption): void {
+    if (option.id === "test-notion-connection") {
+      void this.plugin.testNotionConnection();
+      return;
+    }
+    if (option.id === "run-grammar-probe") {
+      void this.plugin.runNotionGrammarProbe();
+      return;
+    }
+    if (option.id === "run-media-capability-probe") {
+      void this.plugin.runMediaCapabilityProbe();
+      return;
+    }
+    if (option.id === "run-media-write-boundary-probe") {
+      void this.plugin.runMediaWriteBoundaryProbe();
+      return;
+    }
+    if (option.id === "run-media-recovery-probe") {
+      void this.plugin.runMediaRecoveryProbe();
+      return;
+    }
+    if (option.id === "run-media-push-dry-run") {
+      void this.plugin.runMediaPushDryRun();
+      return;
+    }
+    if (option.id === "push-current-folder") {
+      void this.plugin.runExclusivePublic("push-current-folder", "Current folder", () => this.plugin.pushCurrentFolderToNotion());
+      return;
+    }
+    if (option.id === "push-entire-vault") {
+      this.plugin.confirmPushEntireVaultToNotion();
+      return;
+    }
+    if (option.id === "audit-current-folder") {
+      void this.plugin.runExclusivePublic("audit-current-folder", "Current folder", () => this.plugin.auditWorkspaceHierarchy("current-folder"));
+      return;
+    }
+    if (option.id === "audit-entire-vault") {
+      void this.plugin.runExclusivePublic("audit-entire-vault", "Vault root", () => this.plugin.auditWorkspaceHierarchy("entire-vault"));
+      return;
+    }
+    if (option.id === "initialize-current-folder") {
+      void this.plugin.runExclusivePublic("initialize-current-folder", "Current folder", () => this.plugin.initializeWorkspaceMappings("current-folder"));
+      return;
+    }
+    if (option.id === "initialize-entire-vault") {
+      void this.plugin.runExclusivePublic("initialize-entire-vault", "Vault root", () => this.plugin.initializeWorkspaceMappings("entire-vault"));
+      return;
+    }
+    if (option.id === "initialize-sync-baseline") {
+      void initializeSyncBaseline(this.plugin.app, this.plugin.getNotionToken(), this.plugin);
+      return;
+    }
+    if (option.id === "debug-active-mapping") {
+      void debugActiveMapping(this.plugin.app, this.plugin.getNotionToken(), this.plugin);
+      return;
+    }
+    if (option.id === "resolve-conflict-keep-obsidian") {
+      void resolveConflict({ app: this.plugin.app, token: this.plugin.getNotionToken(), baselineStore: this.plugin, strategy: "KEEP_OBSIDIAN" });
+      return;
+    }
+    void resolveConflict({ app: this.plugin.app, token: this.plugin.getNotionToken(), baselineStore: this.plugin, strategy: "KEEP_NOTION" });
   }
 }
 

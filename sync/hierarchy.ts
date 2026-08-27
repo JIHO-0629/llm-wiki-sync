@@ -5,6 +5,7 @@ import {
   getLocalSyncSnapshot,
   getRemoteSyncSnapshot
 } from "./baseline";
+import { areObsidianAndNotionBodiesEquivalent } from "./markdownConversion";
 import {
   getBaseName,
   getFolderMappingKey,
@@ -212,7 +213,7 @@ export async function initializeWorkspaceMappings(options: {
       }
       const localSnapshot = await getLocalSyncSnapshot(context.app, file);
       const remoteSnapshot = await getRemoteSyncSnapshot(context.client, mapping.pageId);
-      if (localSnapshot.fingerprint !== remoteSnapshot.fingerprint) {
+      if (!areObsidianAndNotionBodiesEquivalent(localSnapshot.body, remoteSnapshot.body) || localSnapshot.title !== remoteSnapshot.title) {
         summary.uninitializedDivergence += 1;
         continue;
       }

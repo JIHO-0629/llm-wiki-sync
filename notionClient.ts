@@ -48,6 +48,20 @@ export interface NotionPageDetails {
   response: RequestUrlResponse;
 }
 
+export interface NotionFileUpload {
+  id: string;
+  uploadUrl: string;
+  status: string;
+  contentType: string;
+  contentLength: number | null;
+}
+
+export interface NotionBlock {
+  id: string;
+  type: string;
+  body: Record<string, unknown>;
+}
+
 export class NotionApiError extends Error {
   status: number;
   body?: unknown;
@@ -245,9 +259,113 @@ export class NotionClient {
     return parseCreatedPageResponse(response, options.parentPageId, options.title, options.pushedAt);
   }
 
+  async updatePageMarkdownContent(pageId: string, updates: Array<{ old: string; next: string }>): Promise<RequestUrlResponse> {
+    return this.request({
+      url: `https://api.notion.com/v1/pages/${pageId}/markdown`,
+      method: "PATCH",
+      body: JSON.stringify({ type: "update_content", update_content: { content_updates: updates.map((update) => ({ old_str: update.old, new_str: update.next })) } })
+    }, "Push Update");
+  }
+
+  async getWorkspaceFileUploadLimit(): Promise<number | null> {
+    const response = await this.request({ url: "https://api.notion.com/v1/users/me", method: "GET" }, "Media");
+    const body = response.json as Record<string, unknown>;
+    const bot = body.bot && typeof body.bot === "object" ? body.bot as Record<string, unknown> : null;
+    const limits = bot?.workspace_limits && typeof bot.workspace_limits === "object" ? bot.workspace_limits as Record<string, unknown> : null;
+    return typeof limits?.max_file_upload_size_in_bytes === "number" ? limits.max_file_upload_size_in_bytes : null;
+  }
+
+  async createSinglePartFileUpload(filename: string, contentType: string): Promise<NotionFileUpload> {
+    const response = await this.request({ url: "https://api.notion.com/v1/file_uploads", method: "POST", body: JSON.stringify({ mode: "single_part", filename, content_type: contentType }) }, "Media");
+    return parseFileUpload(response);
+  }
+
+  async sendFileUpload(upload: NotionFileUpload, bytes: ArrayBuffer, filename: string, contentType: string): Promise<NotionFileUpload> {
+    const boundary = `----LlmWikiSync${Date.now().toString(16)}`;
+    const response = await this.request({
+      url: upload.uploadUrl,
+      method: "POST",
+      contentType: `multipart/form-data; boundary=${boundary}`,
+      body: buildMultipartUploadBody(bytes, boundary, filename, contentType)
+    }, "Media");
+    return parseFileUpload(response);
+  }
+
+  async getFileUpload(fileUploadId: string): Promise<NotionFileUpload> {
+    return parseFileUpload(await this.request({ url: `https://api.notion.com/v1/file_uploads/${fileUploadId}`, method: "GET" }, "Media"));
+  }
+
+  async listBlockChildren(blockId: string): Promise<NotionBlock[]> {
+    const response = await this.request({ url: `https://api.notion.com/v1/blocks/${blockId}/children?page_size=100`, method: "GET" }, "Media");
+    const body = response.json as Record<string, unknown>;
+    const results = Array.isArray(body.results) ? body.results : [];
+    return results.flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const block = value as Record<string, unknown>;
+      return typeof block.id === "string" && typeof block.type === "string" ? [{ id: block.id, type: block.type, body: block }] : [];
+    });
+  }
+
+  async appendImageBlock(pageId: string, fileUploadId: string, caption: string, afterBlockId: string): Promise<NotionBlock> {
+    const response = await this.request({
+      url: `https://api.notion.com/v1/blocks/${pageId}/children`, method: "PATCH",
+      body: JSON.stringify({ children: [{ object: "block", type: "image", image: { type: "file_upload", file_upload: { id: fileUploadId }, caption: caption ? [{ type: "text", text: { content: caption } }] : [] } }], position: { type: "after_block", after_block: { id: afterBlockId } } })
+    }, "Media");
+    const body = response.json as Record<string, unknown>; const result = Array.isArray(body.results) ? body.results[0] : null;
+    if (!result || typeof result !== "object") throw new Error("Notion did not return the attached image block");
+    const block = result as Record<string, unknown>;
+    if (typeof block.id !== "string" || typeof block.type !== "string") throw new Error("Notion returned an invalid image block");
+    return { id: block.id, type: block.type, body: block };
+  }
+
+  async trashBlock(blockId: string): Promise<void> {
+    await this.request({ url: `https://api.notion.com/v1/blocks/${blockId}`, method: "PATCH", body: JSON.stringify({ in_trash: true }) }, "Media");
+  }
+
+  async trashPage(pageId: string): Promise<void> {
+    await this.request({ url: `https://api.notion.com/v1/pages/${pageId}`, method: "PATCH", body: JSON.stringify({ in_trash: true }) }, "Media");
+  }
+
+  async createMediaCapabilityProbe(): Promise<RequestUrlResponse> {
+    return this.request(
+      {
+        url: "https://api.notion.com/v1/file_uploads",
+        method: "POST",
+        body: JSON.stringify({
+          mode: "single_part",
+          filename: "llm-wiki-sync-media-probe.txt",
+          content_type: "text/plain"
+        })
+      },
+      "Media Probe"
+    );
+  }
+
+  async sendMediaCapabilityProbe(fileUploadId: string): Promise<RequestUrlResponse> {
+    const boundary = `----llmWikiSync${Date.now().toString(16)}`;
+    const body = new TextEncoder().encode([
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file"; filename="llm-wiki-sync-media-probe.txt"',
+      "Content-Type: text/plain",
+      "",
+      "LLM Wiki Sync disposable media capability probe.",
+      `--${boundary}--`,
+      ""
+    ].join("\r\n"));
+    return this.request(
+      {
+        url: `https://api.notion.com/v1/file_uploads/${fileUploadId}/send`,
+        method: "POST",
+        body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
+        contentType: `multipart/form-data; boundary=${boundary}`
+      },
+      "Media Probe"
+    );
+  }
+
   private async request(
-    options: { url: string; method: string; body?: string },
-    label: "Root check" | "Create page" | "Pull" | "Hierarchy" | "Pull Markdown" | "Push Update" | "Push Title Update" | "Move page"
+    options: { url: string; method: string; body?: string | ArrayBuffer; contentType?: string },
+    label: "Root check" | "Create page" | "Pull" | "Hierarchy" | "Pull Markdown" | "Push Update" | "Push Title Update" | "Move page" | "Media Probe" | "Media"
   ): Promise<RequestUrlResponse> {
     console.debug(`[LLM Wiki Sync][${label}] HTTP method`, options.method);
     console.debug(`[LLM Wiki Sync][${label}] endpoint`, options.url);
@@ -259,7 +377,7 @@ export class NotionClient {
         Authorization: `Bearer ${this.token}`,
         "Notion-Version": NOTION_VERSION,
         Accept: "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": options.contentType ?? "application/json"
       },
       body: options.body,
       throw: false
@@ -449,6 +567,27 @@ function isCreatedDuringPush(createdTime: string, pushedAt: Date): boolean {
 
 function normalizePageId(pageId: string): string {
   return pageId.replace(/-/g, "").toLowerCase();
+}
+
+function parseFileUpload(response: RequestUrlResponse): NotionFileUpload {
+  if (!response.json || typeof response.json !== "object") throw new NotionApiError(response.status, "Notion file upload response did not include JSON", response.text);
+  const body = response.json as Record<string, unknown>;
+  const id = typeof body.id === "string" ? body.id : "";
+  const status = typeof body.status === "string" ? body.status : "";
+  const uploadUrl = typeof body.upload_url === "string" ? body.upload_url : id ? `https://api.notion.com/v1/file_uploads/${id}/send` : "";
+  const contentType = typeof body.content_type === "string" ? body.content_type : "";
+  const contentLength = typeof body.content_length === "number" ? body.content_length : null;
+  if (!id || !status) throw new NotionApiError(response.status, "Notion file upload response was incomplete", body);
+  return { id, uploadUrl, status, contentType, contentLength };
+}
+
+function buildMultipartUploadBody(bytes: ArrayBuffer, boundary: string, filename: string, contentType: string): ArrayBuffer {
+  const encoder = new TextEncoder();
+  const head = encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename.replace(/["\\\r\n]/g, "_")}"\r\nContent-Type: ${contentType}\r\n\r\n`);
+  const tail = encoder.encode(`\r\n--${boundary}--\r\n`);
+  const body = new Uint8Array(head.byteLength + bytes.byteLength + tail.byteLength);
+  body.set(head, 0); body.set(new Uint8Array(bytes), head.byteLength); body.set(tail, head.byteLength + bytes.byteLength);
+  return body.buffer;
 }
 
 function safeJsonForLog(json: unknown, text: string): unknown {

@@ -20,6 +20,9 @@ import {
   replaceMarkdownBodyPreservingFrontmatter
 } from "./mapping";
 import { renameMappedFileAfterPull } from "./pull";
+import { assertSuccessfulConversion, detectRemoteWriteBlocker, prepareNotionMarkdownForWrite, prepareObsidianMarkdownFromNotion } from "./markdownConversion";
+import { prepareObsidianMarkdownWithPulledImages } from "./mediaPull";
+import { containsLocalImage, updateMappedPageTextWithUnchangedImages } from "./mediaPush";
 
 type ResolveStrategy = "KEEP_OBSIDIAN" | "KEEP_NOTION";
 
@@ -145,6 +148,12 @@ async function recheckConflict(app: App, preflight: ResolvePreflight, runId: str
 async function resolveKeepObsidian(options: ResolveConflictOptions, preflight: ResolvePreflight, runId: string): Promise<void> {
   const logPrefix = `[LLM Wiki Sync][Resolve][${runId}]`;
   try {
+    const localHasImages = containsLocalImage(preflight.localSnapshot.body);
+    const blockingRemote = detectRemoteWriteBlocker(preflight.remoteSnapshot.body);
+    if (blockingRemote && !localHasImages) {
+      new Notice(`LLM Wiki Sync: Keep Obsidian refused. Remote contains ${blockingRemote.construct}, which v0.9 cannot preserve.`);
+      return;
+    }
     const pageDetails = await preflight.client.getPageDetails(preflight.pageId);
     if (pageDetails.parentType === "data_source_id") {
       new Notice("LLM Wiki Sync: Conflict resolution failed - title sync is unavailable for this Notion parent.");
@@ -152,16 +161,23 @@ async function resolveKeepObsidian(options: ResolveConflictOptions, preflight: R
     }
 
     console.debug(`${logPrefix} write start`);
-    await preflight.client.updatePageMarkdown(preflight.pageId, preflight.localSnapshot.body);
+    if (localHasImages) {
+      const remoteMarkdown = (await preflight.client.retrievePageMarkdown(preflight.pageId)).markdown;
+      await updateMappedPageTextWithUnchangedImages({ app: options.app, file: preflight.file, localBody: preflight.localSnapshot.body, remoteBody: remoteMarkdown, client: preflight.client, pageId: preflight.pageId, baselineImages: preflight.baseline.images });
+    } else {
+      const notionBody = assertSuccessfulConversion(prepareNotionMarkdownForWrite(preflight.localSnapshot.body), "Obsidian → Notion");
+      await preflight.client.updatePageMarkdown(preflight.pageId, notionBody);
+    }
     await preflight.client.updatePageTitle(preflight.pageId, preflight.localSnapshot.title);
     console.debug(`${logPrefix} write success`);
 
-    await advanceBaselineAndVerifyClean(options, preflight.file, preflight.pageId, preflight.client, runId);
+    await advanceBaselineAndVerifyClean(options, preflight.file, preflight.pageId, preflight.client, runId, preflight.baseline.images);
     new Notice("LLM Wiki Sync: Conflict resolved using Obsidian.");
   } catch (error) {
     console.error(`${logPrefix} partial failure`, getErrorMessage(error));
     logBaselineNotAdvanced(runId, "Keep Obsidian did not complete");
-    new Notice("LLM Wiki Sync: Conflict resolution partially failed. Baseline was not updated.");
+    const message = getErrorMessage(error);
+    new Notice(message.includes("Step 3b-2") ? `LLM Wiki Sync: ${message}` : "LLM Wiki Sync: Conflict resolution partially failed. Baseline was not updated.");
   }
 }
 
@@ -170,7 +186,10 @@ async function resolveKeepNotion(options: ResolveConflictOptions, preflight: Res
   try {
     const pageDetails = await preflight.client.getPageDetails(preflight.pageId);
     const pageMarkdown = await preflight.client.retrievePageMarkdown(preflight.pageId);
-    const nextBody = normalizePulledMarkdown(pageMarkdown.markdown);
+    if (pageMarkdown.truncated) {
+      throw new Error("Keep Notion aborted: Notion Markdown was truncated; the local note was not modified.");
+    }
+    const nextBody = await prepareObsidianMarkdownWithPulledImages(options.app, normalizePulledMarkdown(pageMarkdown.markdown), (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
 
     console.debug(`${logPrefix} write start`);
     await options.app.vault.process(preflight.file, (existingMarkdown) =>
@@ -198,11 +217,12 @@ async function advanceBaselineAndVerifyClean(
   file: TFile,
   pageId: string,
   client: NotionClient,
-  runId: string
+  runId: string,
+  images: SyncBaseline["images"] = []
 ): Promise<void> {
   const localSnapshot = await getLocalSyncSnapshot(options.app, file);
   const remoteSnapshot = await getRemoteSyncSnapshot(client, pageId);
-  const baseline = createSyncBaseline(pageId, localSnapshot, remoteSnapshot);
+  const baseline = createSyncBaseline(pageId, localSnapshot, remoteSnapshot, images);
   await options.baselineStore.saveSyncBaseline(pageId, baseline);
   console.debug(`[LLM Wiki Sync][Baseline][${runId}] advanced`, pageId);
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+
+- Added a fail-closed Markdown conversion layer for Obsidian callouts, tables, highlights, underlines, and supported Notion block colors.
+- Added structural conversion validation and semantic cross-representation comparison without changing baseline schema or conflict logic.
+- Protected truncated Notion Markdown from snapshots, baselines, converters, and local writes.
+- Routed Push, Pull, container indexes, current-note Sync, and conflict resolution through conversion boundaries.
+- Hardened conversion parsing for real Notion table attributes, malformed fences, combined highlight/underline, safe metadata stripping, and unsupported-block degradation. Callout aliases such as `caution` intentionally canonicalize to `warning` on Pull.
+- Final safety policy: v0.9 blocks Push when remote formatting cannot be reproduced and freezes notes containing unsupported semantic blocks (media, embeds, columns, tabs, databases, non-child page references, and related Notion objects). Preserve the remote content manually until dedicated support ships.
+
 ## 0.8.5
 
 - Fixed legacy dual note/folder mappings that caused valid Notion container hierarchies to be skipped as ambiguous during Pull.

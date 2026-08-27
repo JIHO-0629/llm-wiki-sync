@@ -956,6 +956,26 @@ assert.equal(pages.get("linked-local-page").parentPageId, linkedLocalStore.folde
 assert.equal(markdownPatches.some((patch) => patch.pageId === "linked-local-page" && patch.markdown === "\nnew\n"), true);
 
 pages.clear();
+markdownPatches.length = 0;
+addPage(ROOT_PAGE_ID, "Root", "");
+addPage("blocked-remote-page", "Blocked remote", "<details>remote semantic block</details>", ROOT_PAGE_ID);
+const blockedRemoteFile = makeFile("Blocked remote.md", "---\nnotion_page_id: \"blocked-remote-page\"\n---\n\nlocal change\n");
+const blockedRemoteApp = createApp([blockedRemoteFile], "Blocked remote.md");
+const blockedRemoteStore = makeStore();
+blockedRemoteStore.baselines[normalizePageId("blocked-remote-page")] = makeBaseline("blocked-remote-page", "Blocked remote", "\nold\n", "Blocked remote", "<details>remote semantic block</details>");
+const blockedBaselineBefore = JSON.stringify(blockedRemoteStore.baselines[normalizePageId("blocked-remote-page")]);
+const blockedRemoteResult = await pushFileToNotion({
+  app: blockedRemoteApp,
+  file: blockedRemoteFile,
+  client: new NotionClient({ token: "secret_test" }),
+  parentPageId: ROOT_PAGE_ID,
+  baselineStore: blockedRemoteStore
+});
+assert.equal(blockedRemoteResult.status, "unsupported");
+assert.equal(markdownPatches.some((patch) => patch.pageId === "blocked-remote-page"), false);
+assert.equal(JSON.stringify(blockedRemoteStore.baselines[normalizePageId("blocked-remote-page")]), blockedBaselineBefore);
+
+pages.clear();
 notices.length = 0;
 createRequests.length = 0;
 markdownPatches.length = 0;
