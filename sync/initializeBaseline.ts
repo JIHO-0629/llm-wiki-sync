@@ -6,7 +6,7 @@ import {
   getRemoteSyncSnapshot,
   type SyncBaselineStore
 } from "./baseline";
-import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile } from "./mapping";
 
 export async function initializeSyncBaseline(app: App, token: string, baselineStore: SyncBaselineStore): Promise<void> {
   const runId = createRunId();
@@ -14,6 +14,10 @@ export async function initializeSyncBaseline(app: App, token: string, baselineSt
   const file = app.workspace.getActiveFile();
   if (!file || file.extension !== "md") {
     new Notice("LLM Wiki Sync: No active Markdown file to initialize");
+    return;
+  }
+  if (await isContainerIndexFile(app, file)) {
+    new Notice("LLM Wiki Sync: Container index baseline initialization is not supported by normal note baseline initialization.");
     return;
   }
 

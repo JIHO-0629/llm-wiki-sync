@@ -13,7 +13,7 @@ import {
   repairWorkspaceHierarchy,
   resolveNotionParentForFile
 } from "./hierarchy";
-import { findFilesMappedToPage, getNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile } from "./mapping";
 import { pushFileToNotion, type PushFileResult } from "./push";
 import { REVIEW_FOLDER_TITLE, isReviewPath, scanRemoteTree, type RemoteTreePage } from "./remoteTree";
 import { CachedNotionClient, createSyncRunCache } from "./runCache";
@@ -252,6 +252,12 @@ export async function syncFolderWithNotion(options: {
   });
   for (const file of files) {
     if (shouldCancel(options.cancelToken, summary, finish)) return summary;
+    if (await isContainerIndexFile(options.app, file)) {
+      summary.failed += 1;
+      summary.processed += 1;
+      summary.details.push(`SKIPPED ${file.path} - container index files are excluded from normal Folder Sync`);
+      continue;
+    }
     emitProgress({
       phase: "note_sync",
       phaseIndex: 4,
@@ -497,7 +503,7 @@ async function ensureChildPageByTitle(client: NotionClient, parentPageId: string
   if (matches.length > 1) {
     throw new Error(`Ambiguous Review page: ${title}`);
   }
-  const created = await client.createChildPage({ parentPageId, title, children: [], pushedAt: new Date() });
+  const created = await client.createChildPage({ parentPageId, title, markdown: "", pushedAt: new Date() });
   return created.id;
 }
 

@@ -15,6 +15,7 @@ import {
 import {
   findFilesMappedToPage,
   getNotionPageMapping,
+  isContainerIndexFile,
   normalizePulledMarkdown,
   replaceMarkdownBodyPreservingFrontmatter
 } from "./mapping";
@@ -60,6 +61,10 @@ async function getResolvePreflight(options: ResolveConflictOptions, runId: strin
   const file = options.app.workspace.getActiveFile();
   if (!file || file.extension !== "md") {
     new Notice("LLM Wiki Sync: No active Markdown file to resolve");
+    return null;
+  }
+  if (await isContainerIndexFile(options.app, file)) {
+    new Notice("LLM Wiki Sync: Container index conflict resolution is not supported by normal note conflict resolution.");
     return null;
   }
 
@@ -168,8 +173,9 @@ async function resolveKeepNotion(options: ResolveConflictOptions, preflight: Res
     const nextBody = normalizePulledMarkdown(pageMarkdown.markdown);
 
     console.debug(`${logPrefix} write start`);
-    const existingMarkdown = await options.app.vault.read(preflight.file);
-    await options.app.vault.modify(preflight.file, replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, preflight.pageId));
+    await options.app.vault.process(preflight.file, (existingMarkdown) =>
+      replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, preflight.pageId)
+    );
     const renameResult = await renameMappedFileAfterPull(options.app, preflight.file, preflight.pageId, pageDetails.title, runId);
     if (renameResult !== "renamed" && renameResult !== "noop") {
       throw new Error(`rename result: ${renameResult}`);

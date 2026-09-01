@@ -236,6 +236,12 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
     await this.saveSettings();
   }
 
+  async removeFolderMapping(mappingKey: string): Promise<void> {
+    this.ensureSyncStateContainer();
+    delete this.settings.folderMappings[mappingKey];
+    await this.saveSettings();
+  }
+
   getAllSyncBaselinePageIds(): string[] {
     this.ensureSyncStateContainer();
     return Object.keys(this.settings.syncStates);

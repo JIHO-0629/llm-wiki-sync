@@ -8,7 +8,7 @@ import {
   logConflictState,
   type SyncBaselineStore
 } from "./baseline";
-import { findFilesMappedToPage, getNotionPageMapping, normalizePulledMarkdown, replaceMarkdownBodyPreservingFrontmatter } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, normalizePulledMarkdown, replaceMarkdownBodyPreservingFrontmatter } from "./mapping";
 import { pushCurrentNoteToNotion } from "./push";
 import { renameMappedFileAfterPull } from "./pull";
 import { resolveConflict } from "./resolveConflict";
@@ -53,6 +53,10 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
     new Notice("LLM Wiki Sync: Push failed - notion_page_id is empty");
     return;
   }
+  if (await isContainerIndexFile(options.app, file)) {
+    new Notice("LLM Wiki Sync: Container index files are excluded from normal note sync.");
+    return;
+  }
   console.debug(`${logPrefix} notion_page_id:`, mapping.pageId);
 
   const mappedFiles = await findFilesMappedToPage(options.app, mapping.pageId);
@@ -83,6 +87,7 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
 
   try {
     const client = new NotionClient({ token });
+    const hierarchyMoved = await repairLinkedNoteHierarchyIfNeeded(options, client, file, mapping.pageId, logPrefix);
     const localSnapshot = await getLocalSyncSnapshot(options.app, file);
     const remoteSnapshot = await getRemoteSyncSnapshot(client, mapping.pageId);
     const change = compareSnapshotsToBaseline(baseline, localSnapshot, remoteSnapshot);
@@ -91,7 +96,9 @@ export async function syncCurrentNote(options: SyncCurrentNoteOptions): Promise<
 
     if (change.state === "CLEAN") {
       console.debug(`${logPrefix} action: NONE`);
-      new Notice("LLM Wiki Sync: Already in sync.");
+      new Notice(hierarchyMoved
+        ? "LLM Wiki Sync: Moved to matching Notion folder. Content already in sync."
+        : "LLM Wiki Sync: Already in sync.");
       return;
     }
     if (change.state === "CONFLICT") {
@@ -130,8 +137,9 @@ async function pullActiveMappedNote(
   const pageDetails = await client.getPageDetails(pageId);
   const pageMarkdown = await client.retrievePageMarkdown(pageId);
   const nextBody = normalizePulledMarkdown(pageMarkdown.markdown);
-  const existingMarkdown = await app.vault.read(file);
-  await app.vault.modify(file, replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, pageId));
+  await app.vault.process(file, (existingMarkdown) =>
+    replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, pageId)
+  );
   const renameResult = await renameMappedFileAfterPull(app, file, pageId, pageDetails.title, runId);
   if (renameResult !== "renamed" && renameResult !== "noop") {
     throw new Error(`Pull partial failure: rename result ${renameResult}`);
@@ -142,6 +150,35 @@ async function pullActiveMappedNote(
   const remoteSnapshot = await getRemoteSyncSnapshot(client, pageId);
   await baselineStore.saveSyncBaseline(pageId, createSyncBaseline(pageId, localSnapshot, remoteSnapshot));
   console.debug(`[LLM Wiki Sync][Baseline][${runId}] advanced`, pageId);
+}
+
+async function repairLinkedNoteHierarchyIfNeeded(
+  options: SyncCurrentNoteOptions,
+  client: NotionClient,
+  file: TFile,
+  pageId: string,
+  logPrefix: string
+): Promise<boolean> {
+  if (!options.resolveParentPageId) {
+    return false;
+  }
+
+  const expectedParentPageId = await options.resolveParentPageId(file);
+  if (!expectedParentPageId) {
+    return false;
+  }
+
+  const pageDetails = await client.getPageDetails(pageId);
+  if (
+    pageDetails.parentType === "page_id" &&
+    normalizePageId(pageDetails.parentPageId) === normalizePageId(expectedParentPageId)
+  ) {
+    return false;
+  }
+
+  await client.movePageToPage(pageId, expectedParentPageId);
+  console.debug(`${logPrefix} hierarchy repaired`, pageId, expectedParentPageId);
+  return true;
 }
 
 async function assertFinalClean(app: App, baselineStore: SyncBaselineStore, client: NotionClient, file: TFile, pageId: string, runId: string): Promise<void> {
@@ -167,6 +204,10 @@ function createRunId(): string {
 function getErrorMessage(error: unknown): string {
   if (error instanceof NotionApiError) return `${error.status} - ${error.message}`;
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizePageId(pageId: string): string {
+  return pageId.replace(/-/g, "").toLowerCase();
 }
 
 class SyncConflictModal extends Modal {
