@@ -50,7 +50,7 @@ LLM Wiki Sync is available in the official Obsidian Community Plugins directory.
 4. Click `Install`.
 5. Click `Enable`.
 
-Current public release: **v0.8.2**.
+Current public release: **v0.9.0**.
 
 ### Manual Installation
 

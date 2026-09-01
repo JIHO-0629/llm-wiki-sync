@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Added the v0.9 Markdown conversion safety layer, including fail-closed handling for unsupported or malformed content.
+- Added bidirectional Notion callout conversion and lossless Notion table-of-contents transport markers.
+- Added conservative media identity, Pull, and Push support with regression coverage.
+- Preserved hierarchy safety, folder mapping ambiguity protection, and baseline conflict checks during Pull and Push.
+
 ## 0.8.5
 
 - Fixed legacy dual note/folder mappings that caused valid Notion container hierarchies to be skipped as ambiguous during Pull.
