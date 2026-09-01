@@ -1,6 +1,6 @@
 import { Notice, normalizePath, TFile, type App } from "obsidian";
 import { extractNotionPageId, NotionApiError, NotionClient } from "../notionClient";
-import { isSafeVisibleFileName, sanitizeNotionTitleForFileName } from "../utils/fileName";
+import { isSafeVisibleFileName, sanitizeFileName, sanitizeNotionTitleForFileName } from "../utils/fileName";
 import {
   compareSnapshotsToBaseline,
   createSyncBaseline,
@@ -19,22 +19,41 @@ import {
   normalizePulledMarkdown,
   replaceMarkdownBodyPreservingFrontmatter
 } from "./mapping";
+import {
+  getFolderMappingKey,
+  normalizeVaultFolderPath,
+  type FolderMapping,
+  type FolderMappingStore
+} from "./bulkPush";
+import { isReviewPath, scanRemoteTree, type RemoteTreePage } from "./remoteTree";
 
 export interface PullPagesFromNotionOptions {
   app: App;
   token: string;
   rootPageUrl: string;
   baselineStore: SyncBaselineStore;
+  store?: PullStore;
 }
 
-interface PullCounts { created: number; updated: number; skipped: number; failed: number; }
+export interface PullStore extends SyncBaselineStore, FolderMappingStore {
+  getAllFolderMappings?(): FolderMapping[];
+}
+
+interface PullCounts { created: number; updated: number; skipped: number; failed: number; foldersCreated: number; }
 
 const PULL_FOLDER = "LLM Wiki Sync Pull";
+
+type StoredFolderPathResult =
+  | { status: "none" }
+  | { status: "matched"; folderPath: string }
+  | { status: "ambiguous"; reason: string };
+
+type FolderMappingPersistResult = "saved" | "matched" | "unavailable" | { status: "ambiguous"; reason: string };
 
 export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): Promise<void> {
   const runId = createRunId();
   const logPrefix = `[LLM Wiki Sync][Pull][${runId}]`;
-  const counts: PullCounts = { created: 0, updated: 0, skipped: 0, failed: 0 };
+  const counts: PullCounts = { created: 0, updated: 0, skipped: 0, failed: 0, foldersCreated: 0 };
   const token = options.token.trim();
   if (!token) { new Notice("LLM Wiki Sync: Notion API token is missing"); return; }
 
@@ -46,12 +65,43 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
   new Notice("LLM Wiki Sync: Pulling from Notion...");
 
   try {
-    const childPages = await client.listRootChildPages(rootPageId);
-    if (!options.app.vault.getAbstractFileByPath(PULL_FOLDER)) await options.app.vault.createFolder(PULL_FOLDER);
+    const remotePages = await scanRemoteTree(client, rootPageId);
+    const normalizedRootPageId = normalizeNotionPageId(rootPageId);
+    const store = options.store ?? asOptionalPullStore(options.baselineStore);
+    const folderPathByPageId = new Map<string, string | null>([[normalizeNotionPageId(rootPageId), PULL_FOLDER]]);
+    const blockedSubtreePageIds = new Set<string>();
+    const pullFolderResult = await ensureLocalFolder(options.app, PULL_FOLDER);
+    if (pullFolderResult === "created") counts.foldersCreated += 1;
+    if (pullFolderResult !== "created" && pullFolderResult !== "exists") {
+      new Notice("LLM Wiki Sync: Pull folder path is blocked by a file.");
+      return;
+    }
 
-    for (const childPage of childPages) {
+    for (const childPage of remotePages) {
       try {
         const pageLog = `${logPrefix}[${childPage.id}]`;
+        if (isReviewPath(childPage.path)) {
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+          counts.skipped += 1;
+          console.warn(`${pageLog} skipped: system Review path`, childPage.path);
+          continue;
+        }
+
+        const parentFolderPath = folderPathByPageId.get(normalizeNotionPageId(childPage.parentPageId));
+        if (parentFolderPath === null || isBlockedByAncestor(childPage, blockedSubtreePageIds)) {
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          counts.skipped += 1;
+          console.warn(`${pageLog} skipped: parent hierarchy is ambiguous`);
+          continue;
+        }
+        if (parentFolderPath === undefined) {
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          counts.skipped += 1;
+          console.warn(`${pageLog} skipped: parent folder was not resolved`);
+          continue;
+        }
+
         console.debug(`${pageLog} notion_page_id:`, childPage.id);
         const mappedFiles = await findFilesMappedToPage(options.app, childPage.id);
         if (mappedFiles.length > 1) {
@@ -61,7 +111,87 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           continue;
         }
 
+        const storedFolderPath = getStoredFolderPathForRemotePage(store, childPage.id, normalizedRootPageId);
+        if (storedFolderPath.status === "ambiguous") {
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+          counts.skipped += 1;
+          console.warn(`${pageLog} skipped: ambiguous folder mapping`, storedFolderPath.reason);
+          new Notice("LLM Wiki Sync: Ambiguous folder mapping skipped.");
+          continue;
+        }
+
+        const pageDetails = await client.getPageDetails(childPage.id);
+        const rawTitle = pageDetails.title || childPage.title;
+        const pageMarkdown = await client.retrievePageMarkdown(childPage.id);
+        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
+        const cleanMarkdown = normalizePulledMarkdown(pageMarkdown.markdown);
+        if (pageMarkdown.truncated) {
+          console.warn(`${pageLog} Notion content truncated:`, pageMarkdown.unknownBlockIds);
+          new Notice("LLM Wiki Sync: Warning - Notion page content was truncated");
+        }
+
+        if (storedFolderPath.status === "matched" && mappedFiles.length === 1) {
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+          counts.skipped += 1;
+          console.warn(`${pageLog} skipped: page has both note mapping and folder mapping`);
+          new Notice("LLM Wiki Sync: Ambiguous note/folder mapping skipped.");
+          continue;
+        }
+
+        if (storedFolderPath.status === "matched") {
+          const folderPath = storedFolderPath.folderPath;
+          const expectedFolderPath = getExpectedMappedFolderPath(childPage, parentFolderPath, rootPageId, folderPath, rawTitle);
+          if (normalizeVaultFolderPath(folderPath) !== normalizeVaultFolderPath(expectedFolderPath)) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: stale folder mapping path`, { stored: folderPath, expected: expectedFolderPath });
+            new Notice("LLM Wiki Sync: Stale folder mapping skipped.");
+            continue;
+          }
+          if (!childPage.hasChildren || pageMarkdown.truncated || !isOwnContentEmpty(pageMarkdown.markdown, childPage.directChildren)) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: mapped folder has content, no children, or truncated markdown`);
+            new Notice("LLM Wiki Sync: Ambiguous mapped folder skipped.");
+            continue;
+          }
+          const folderResult = await ensureLocalFolder(options.app, folderPath);
+          if (folderResult === "created") counts.foldersCreated += 1;
+          if (folderResult === "file_collision" || folderResult === "failed") {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: stored folder mapping path is blocked`, folderPath);
+            continue;
+          }
+          const persistResult = await persistFolderMappingIfPossible(store, normalizedRootPageId, folderPath, childPage.id);
+          if (isAmbiguousPersistResult(persistResult)) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: ambiguous folder mapping`, persistResult.reason);
+            new Notice("LLM Wiki Sync: Ambiguous folder mapping skipped.");
+            continue;
+          }
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), folderPath);
+          counts.skipped += 1;
+          continue;
+        }
+
         if (mappedFiles.length === 1) {
+          if (childPage.hasChildren) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: mapped notes with children are ambiguous`);
+            new Notice("LLM Wiki Sync: Ambiguous mapped note with children skipped.");
+            continue;
+          }
+
           const mappedFile = mappedFiles[0];
           let baseline;
           try {
@@ -80,16 +210,6 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           }
 
           const localSnapshot = await getLocalSyncSnapshot(options.app, mappedFile);
-          const pageDetails = await client.getPageDetails(childPage.id);
-          const rawTitle = pageDetails.title || childPage.title;
-          const pageMarkdown = await client.retrievePageMarkdown(childPage.id);
-          const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
-          const cleanMarkdown = normalizePulledMarkdown(pageMarkdown.markdown);
-          if (pageMarkdown.truncated) {
-            console.warn(`${pageLog} Notion content truncated:`, pageMarkdown.unknownBlockIds);
-            new Notice("LLM Wiki Sync: Warning - Notion page content was truncated");
-          }
-
           const change = compareSnapshotsToBaseline(baseline, localSnapshot, remoteSnapshot);
           logConflictState(runId, change.localChanged, change.remoteChanged, change.state);
           if (change.state === "CLEAN") {
@@ -112,8 +232,9 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           console.debug(`${pageLog} raw Notion title:`, rawTitle);
           console.debug(`${pageLog} current local path:`, mappedFile.path);
           console.debug(`${pageLog} body update start`);
-          const existingMarkdown = await options.app.vault.read(mappedFile);
-          await options.app.vault.modify(mappedFile, replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, cleanMarkdown, childPage.id));
+          await options.app.vault.process(mappedFile, (existingMarkdown) =>
+            replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, cleanMarkdown, childPage.id)
+          );
           console.debug(`${pageLog} body update result: success`);
           counts.updated += 1;
 
@@ -130,14 +251,62 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           continue;
         }
 
-        const pageDetails = await client.getPageDetails(childPage.id);
-        const rawTitle = pageDetails.title || childPage.title;
-        const pageMarkdown = await client.retrievePageMarkdown(childPage.id);
-        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
-        const cleanMarkdown = normalizePulledMarkdown(pageMarkdown.markdown);
-        if (pageMarkdown.truncated) {
-          console.warn(`${pageLog} Notion content truncated:`, pageMarkdown.unknownBlockIds);
-          new Notice("LLM Wiki Sync: Warning - Notion page content was truncated");
+        if (childPage.hasChildren) {
+          if (pageMarkdown.truncated) {
+            console.warn(`${pageLog} skipped: container markdown truncated`);
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            new Notice("LLM Wiki Sync: Ambiguous truncated container skipped.");
+            continue;
+          }
+          if (isOwnContentEmpty(pageMarkdown.markdown, childPage.directChildren)) {
+            const folderPath = getExpectedFolderPath(parentFolderPath, rawTitle);
+            if (!isSafeVisibleFileName(getLastPathSegment(folderPath))) {
+              console.error(`${pageLog} sanitizer error: unsafe folder target`, folderPath || "<invalid>");
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+              blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              counts.failed += 1;
+              continue;
+            }
+            const mappingAmbiguity = getFolderMappingAmbiguity(store, normalizedRootPageId, folderPath, childPage.id);
+            if (mappingAmbiguity) {
+              console.warn(`${pageLog} skipped: ambiguous folder mapping`, mappingAmbiguity.reason);
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+              blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              counts.skipped += 1;
+              new Notice("LLM Wiki Sync: Ambiguous folder mapping skipped.");
+              continue;
+            }
+            const folderResult = await ensureLocalFolder(options.app, folderPath);
+            if (folderResult === "created") counts.foldersCreated += 1;
+            if (folderResult === "file_collision" || folderResult === "failed") {
+              console.warn(`${pageLog} folder create skipped: target collision or failure`, folderPath);
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+              blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              counts.skipped += 1;
+              continue;
+            }
+            const persistResult = await persistFolderMappingIfPossible(store, normalizedRootPageId, folderPath, childPage.id);
+            if (isAmbiguousPersistResult(persistResult)) {
+              console.warn(`${pageLog} skipped: ambiguous folder mapping`, persistResult.reason);
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+              blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              counts.skipped += 1;
+              new Notice("LLM Wiki Sync: Ambiguous folder mapping skipped.");
+              continue;
+            }
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), folderPath);
+            counts.skipped += 1;
+            continue;
+          }
+
+          console.warn(`${pageLog} skipped: remote page has both note content and child pages`, childPage.path);
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+          blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+          counts.skipped += 1;
+          new Notice("LLM Wiki Sync: Ambiguous remote page with content and children skipped.");
+          continue;
         }
 
         const fileName = sanitizeNotionTitleForFileName(rawTitle);
@@ -146,7 +315,7 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
           counts.failed += 1;
           continue;
         }
-        const filePath = normalizePath(`${PULL_FOLDER}/${fileName}`);
+        const filePath = normalizePath(`${parentFolderPath}/${fileName}`);
         if (options.app.vault.getAbstractFileByPath(filePath)) {
           console.warn(`${pageLog} create skipped: target already exists`, filePath);
           counts.skipped += 1;
@@ -166,7 +335,188 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
     return;
   }
 
-  new Notice(`LLM Wiki Sync: Created ${counts.created}, updated ${counts.updated}, skipped ${counts.skipped}, failed ${counts.failed}.`);
+  new Notice(`LLM Wiki Sync: Created ${counts.created}, updated ${counts.updated}, skipped ${counts.skipped}, failed ${counts.failed}, folders created ${counts.foldersCreated}.`);
+}
+
+function asOptionalPullStore(store: SyncBaselineStore): PullStore | undefined {
+  const candidate = store as Partial<PullStore>;
+  if (typeof candidate.getFolderMapping === "function" && typeof candidate.saveFolderMapping === "function") {
+    return candidate as PullStore;
+  }
+  return undefined;
+}
+
+function getStoredFolderPathForRemotePage(store: PullStore | undefined, pageId: string, normalizedRootPageId: string): StoredFolderPathResult {
+  const normalizedPageId = normalizeNotionPageId(pageId);
+  const mappings = typeof store?.getAllFolderMappings === "function" ? store.getAllFolderMappings() : [];
+  const matches = mappings.filter((mapping) =>
+    normalizeNotionPageId(mapping.rootPageId) === normalizedRootPageId &&
+    normalizeNotionPageId(mapping.notionPageId) === normalizedPageId
+  );
+  if (matches.length === 0) {
+    return { status: "none" };
+  }
+  const uniquePaths = new Set(matches.map((mapping) => normalizeVaultFolderPath(mapping.lastKnownPath)));
+  if (uniquePaths.size > 1) {
+    return { status: "ambiguous", reason: `remote page is mapped to multiple local folders: ${Array.from(uniquePaths).join(", ")}` };
+  }
+  return { status: "matched", folderPath: Array.from(uniquePaths)[0] ?? "" };
+}
+
+function getFolderMappingAmbiguity(
+  store: PullStore | undefined,
+  normalizedRootPageId: string,
+  folderPath: string,
+  pageId: string
+): { status: "ambiguous"; reason: string } | null {
+  if (!store) {
+    return null;
+  }
+  const normalizedFolderPath = normalizeVaultFolderPath(folderPath);
+  const mappingKey = getFolderMappingKey(normalizedRootPageId, normalizedFolderPath);
+  const existing = store.getFolderMapping(mappingKey);
+  if (
+    existing &&
+    normalizeNotionPageId(existing.rootPageId) === normalizedRootPageId &&
+    normalizeNotionPageId(existing.notionPageId) !== normalizeNotionPageId(pageId)
+  ) {
+    return {
+      status: "ambiguous",
+      reason: `${normalizedFolderPath} is already mapped to ${existing.notionPageId}, not ${pageId}`
+    };
+  }
+
+  const inverse = getStoredFolderPathForRemotePage(store, pageId, normalizedRootPageId);
+  if (inverse.status === "ambiguous") {
+    return inverse;
+  }
+  if (inverse.status === "matched" && normalizeVaultFolderPath(inverse.folderPath) !== normalizedFolderPath) {
+    return {
+      status: "ambiguous",
+      reason: `${pageId} is already mapped to ${inverse.folderPath}, not ${normalizedFolderPath}`
+    };
+  }
+  return null;
+}
+
+async function persistFolderMappingIfPossible(
+  store: PullStore | undefined,
+  normalizedRootPageId: string,
+  folderPath: string,
+  pageId: string
+): Promise<FolderMappingPersistResult> {
+  if (!store) {
+    return "unavailable";
+  }
+  const normalizedFolderPath = normalizeVaultFolderPath(folderPath);
+  const mappingKey = getFolderMappingKey(normalizedRootPageId, normalizedFolderPath);
+  const existing = store.getFolderMapping(mappingKey);
+  if (
+    existing &&
+    normalizeNotionPageId(existing.rootPageId) === normalizedRootPageId &&
+    normalizeNotionPageId(existing.notionPageId) === normalizeNotionPageId(pageId)
+  ) {
+    return "matched";
+  }
+  const ambiguity = getFolderMappingAmbiguity(store, normalizedRootPageId, normalizedFolderPath, pageId);
+  if (ambiguity) {
+    return ambiguity;
+  }
+  await store.saveFolderMapping(mappingKey, {
+    notionPageId: pageId,
+    lastKnownPath: normalizedFolderPath,
+    rootPageId: normalizedRootPageId
+  });
+  return "saved";
+}
+
+function isAmbiguousPersistResult(result: FolderMappingPersistResult): result is { status: "ambiguous"; reason: string } {
+  return typeof result === "object" && result.status === "ambiguous";
+}
+
+async function ensureLocalFolder(app: App, folderPath: string): Promise<"created" | "exists" | "file_collision" | "failed"> {
+  const normalizedFolderPath = normalizeVaultFolderPath(folderPath);
+  if (!normalizedFolderPath) {
+    return "exists";
+  }
+  const segments = normalizedFolderPath.split("/");
+  let created = false;
+  for (let index = 0; index < segments.length; index += 1) {
+    const currentPath = segments.slice(0, index + 1).join("/");
+    const existing = app.vault.getAbstractFileByPath(currentPath);
+    if (existing) {
+      if (existing instanceof TFile) {
+        return "file_collision";
+      }
+      continue;
+    }
+    try {
+      await app.vault.createFolder(currentPath);
+      created = true;
+    } catch (error) {
+      console.error("[LLM Wiki Sync][Pull] folder create failed", currentPath, getErrorMessage(error));
+      return "failed";
+    }
+  }
+  return created ? "created" : "exists";
+}
+
+function isBlockedByAncestor(page: RemoteTreePage, blockedPageIds: Set<string>): boolean {
+  return blockedPageIds.has(normalizeNotionPageId(page.parentPageId));
+}
+
+function isOwnContentEmpty(markdown: string, directChildren: Array<{ id: string; title: string }>): boolean {
+  return stripDirectChildPageReferences(markdown, directChildren).replace(/\s+/g, "").length === 0;
+}
+
+export function stripDirectChildPageReferences(markdown: string, directChildren: Array<{ id: string; title: string }>): string {
+  return markdown
+    .replace(/^[ \t]*<empty-block\/>[ \t]*$/gm, "")
+    .replace(/^[ \t]*<page\b([^>]*)>([^<]*)<\/page>[ \t]*$/gm, (line, attrs: string, title: string) => {
+      const normalizedTitle = decodeHtmlEntities(title.trim());
+      const normalizedAttrs = normalizeNotionPageId(attrs);
+      for (const child of directChildren) {
+        if (normalizedTitle === child.title && normalizedAttrs.includes(normalizeNotionPageId(child.id))) {
+          return "";
+        }
+      }
+      return line;
+    });
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function getLastPathSegment(path: string): string {
+  const normalized = normalizeVaultFolderPath(path);
+  const segments = normalized.split("/");
+  return segments[segments.length - 1] ?? "";
+}
+
+function getExpectedFolderPath(parentFolderPath: string, rawTitle: string): string {
+  return normalizePath(`${parentFolderPath}/${sanitizeFileName(rawTitle)}`);
+}
+
+function getExpectedMappedFolderPath(
+  childPage: RemoteTreePage,
+  parentFolderPath: string,
+  rootPageId: string,
+  storedFolderPath: string,
+  rawTitle: string
+): string {
+  const normalizedStoredFolderPath = normalizeVaultFolderPath(storedFolderPath);
+  const expectedParentPath = normalizeNotionPageId(childPage.parentPageId) !== normalizeNotionPageId(rootPageId)
+    ? parentFolderPath
+    : normalizedStoredFolderPath.startsWith(`${PULL_FOLDER}/`)
+      ? PULL_FOLDER
+      : "";
+  return getExpectedFolderPath(expectedParentPath, rawTitle);
 }
 
 async function advancePullBaselineAfterSuccess(
