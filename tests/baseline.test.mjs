@@ -24,7 +24,7 @@ const result = esbuild.buildSync({
 });
 const module = { exports: {} };
 new Function("module", "exports", "require", result.outputFiles[0].text)(module, module.exports, require);
-const { compareSnapshotsToBaseline, getSyncChangeState, normalizeSyncBody } = module.exports;
+const { compareSnapshotsToBaseline, createSyncBaseline, getSyncChangeState, normalizeEphemeralNotionMediaUrlsForFingerprint, normalizeSyncBody, validateSyncBaseline } = module.exports;
 
 assert.equal(getSyncChangeState(false, false), "CLEAN");
 assert.equal(getSyncChangeState(true, false), "LOCAL_ONLY_CHANGED");
@@ -33,6 +33,16 @@ assert.equal(getSyncChangeState(true, true), "CONFLICT");
 
 assert.equal(normalizeSyncBody("a\r\nb\n\n"), "a\nb\n");
 assert.equal(normalizeSyncBody(""), "\n");
+
+const signedImageA = "![caption](https://prod-files-secure.s3.us-west-2.amazonaws.com/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/image.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=one&X-Amz-Date=20260826T000000Z&X-Amz-Expires=3600&X-Amz-Signature=one)";
+const signedImageB = "![caption](https://prod-files-secure.s3.us-west-2.amazonaws.com/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/image.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=two&X-Amz-Date=20260826T000001Z&X-Amz-Expires=3600&X-Amz-Signature=two)";
+const otherSignedImage = "![caption](https://prod-files-secure.s3.us-west-2.amazonaws.com/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/cccccccc-cccc-cccc-cccc-cccccccccccc/image.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=two&X-Amz-Date=20260826T000001Z&X-Amz-Expires=3600&X-Amz-Signature=two)";
+assert.equal(normalizeSyncBody(signedImageA), normalizeSyncBody(signedImageB));
+assert.notEqual(normalizeSyncBody(signedImageA), normalizeSyncBody(otherSignedImage));
+assert.notEqual(normalizeSyncBody(signedImageA), normalizeSyncBody(signedImageA.replace("caption", "other caption")));
+assert.notEqual(normalizeSyncBody("![x](https://example.com/image.png?version=1)"), normalizeSyncBody("![x](https://example.com/image.png?version=2)"));
+assert.equal(normalizeEphemeralNotionMediaUrlsForFingerprint("![x](not a url)"), "![x](not a url)");
+assert.equal(normalizeSyncBody("plain\r\ntext\n\n"), "plain\ntext\n");
 
 const baseline = {
   notionPageId: "page",
@@ -49,6 +59,10 @@ const localA = { title: "Local", body: "a\n", fingerprint: "local-a", mtime: 1 }
 const localB = { title: "Local 2", body: "a\n", fingerprint: "local-b", mtime: 2 };
 const remoteA = { title: "Remote", body: "a\n", fingerprint: "remote-a", lastEditedTime: "2026-08-14T00:00:00.000Z" };
 const remoteB = { title: "Remote 2", body: "a\n", fingerprint: "remote-b", lastEditedTime: "2026-08-14T00:00:01.000Z" };
+
+assert.deepEqual(validateSyncBaseline(baseline, "page")?.images, []);
+const carriedImages = [{ localPath: "99_Attachments/step3test.png", contentHash: "hash", remoteStableId: "11111111-1111-1111-1111-111111111111", caption: "caption" }];
+assert.deepEqual(createSyncBaseline("page", localA, remoteA, carriedImages).images, carriedImages);
 
 assert.equal(compareSnapshotsToBaseline(baseline, localA, remoteA).state, "CLEAN");
 assert.equal(compareSnapshotsToBaseline(baseline, localB, remoteA).state, "LOCAL_ONLY_CHANGED");

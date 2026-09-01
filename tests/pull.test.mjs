@@ -770,9 +770,51 @@ const unmatchedRefApp = createApp();
 const unmatchedRefStore = makeStore();
 await runPull(unmatchedRefApp, unmatchedRefStore);
 const unmatchedRefIndex = unmatchedRefApp.vault.getAbstractFileByPath("Unmatched Page Ref/_index.md");
-assert.ok(unmatchedRefIndex);
-assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/not-a-child">Not A Child</page>'), true);
-assert.equal(unmatchedRefIndex.content.includes('<page url="https://www.notion.so/actual-child">Actual Child</page>'), false);
+assert.equal(unmatchedRefIndex, null);
+
+resetRemote();
+addPage("isolated-container", "Isolated Container", 'unsafe own body\n<page url="https://www.notion.so/not-a-child">Not A Child</page>\n<page url="https://www.notion.so/isolated-child">Child</page>\n');
+addPage("isolated-child", "Child", "child body\n", "isolated-container");
+const isolatedIndexContent = "---\nnotion_page_id: \"isolated-container\"\nnotion_page_role: \"container_index\"\n---\n\nlocal body\n";
+const isolatedIndex = makeFile("Isolated Container/_index.md", isolatedIndexContent);
+const isolatedApp = createApp([isolatedIndex], ["Isolated Container"]);
+const isolatedStore = makeStore();
+isolatedStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Isolated Container")] = {
+  notionPageId: "isolated-container",
+  lastKnownPath: "Isolated Container",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+isolatedStore.baselines[normalizePageId("isolated-container")] = makeBaseline("isolated-container", "_index", "\nlocal body\n", "Isolated Container", "local body\n");
+const isolatedBaselineTimestamp = isolatedStore.baselines[normalizePageId("isolated-container")].syncedAt;
+await runPull(isolatedApp, isolatedStore);
+assert.equal(isolatedIndex.content, isolatedIndexContent);
+assert.equal(isolatedStore.baselines[normalizePageId("isolated-container")].syncedAt, isolatedBaselineTimestamp);
+assert.ok(isolatedApp.vault.getAbstractFileByPath("Isolated Container/Child.md"));
+
+resetRemote();
+addPage("direct-child-container", "Direct Child Container", 'safe own body\n<page url="https://www.notion.so/direct-child-leaf">Child</page>\n');
+addPage("direct-child-leaf", "Child", "child body\n", "direct-child-container");
+const directChildIndex = makeFile("Direct Child Container/_index.md", "---\nnotion_page_id: \"direct-child-container\"\nnotion_page_role: \"container_index\"\n---\n\nold body\n");
+const directChildApp = createApp([directChildIndex], ["Direct Child Container"]);
+const directChildStore = makeStore();
+directChildStore.folderMappings[mappingKey(ROOT_PAGE_ID, "Direct Child Container")] = {
+  notionPageId: "direct-child-container",
+  lastKnownPath: "Direct Child Container",
+  rootPageId: normalizePageId(ROOT_PAGE_ID)
+};
+directChildStore.baselines[normalizePageId("direct-child-container")] = makeBaseline("direct-child-container", "_index", "\nold body\n", "Direct Child Container", "old body\n");
+await runPull(directChildApp, directChildStore);
+assert.equal(directChildIndex.content.includes("safe own body"), true);
+assert.equal(directChildIndex.content.includes("<page "), false);
+assert.ok(directChildApp.vault.getAbstractFileByPath("Direct Child Container/Child.md"));
+
+resetRemote();
+addPage("unsafe-leaf", "Unsafe Leaf", 'unsafe\n<page url="https://www.notion.so/not-a-child">Not A Child</page>\n');
+const unsafeLeafApp = createApp();
+const unsafeLeafStore = makeStore();
+await runPull(unsafeLeafApp, unsafeLeafStore);
+assert.equal(unsafeLeafApp.vault.getAbstractFileByPath("Unsafe Leaf.md"), null);
+assert.equal(unsafeLeafStore.baselines[normalizePageId("unsafe-leaf")], undefined);
 
 resetRemote();
 addPage("local-only", "Local Only", "old\n");

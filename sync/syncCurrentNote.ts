@@ -9,6 +9,8 @@ import {
   type SyncBaselineStore
 } from "./baseline";
 import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, normalizePulledMarkdown, replaceMarkdownBodyPreservingFrontmatter } from "./mapping";
+import { assertSuccessfulConversion, prepareObsidianMarkdownFromNotion } from "./markdownConversion";
+import { prepareObsidianMarkdownWithPulledImages } from "./mediaPull";
 import { pushCurrentNoteToNotion } from "./push";
 import { renameMappedFileAfterPull } from "./pull";
 import { resolveConflict } from "./resolveConflict";
@@ -136,7 +138,10 @@ async function pullActiveMappedNote(
 ): Promise<void> {
   const pageDetails = await client.getPageDetails(pageId);
   const pageMarkdown = await client.retrievePageMarkdown(pageId);
-  const nextBody = normalizePulledMarkdown(pageMarkdown.markdown);
+  if (pageMarkdown.truncated) {
+    throw new Error("Pull aborted: Notion Markdown was truncated; the local note was not modified.");
+  }
+  const nextBody = await prepareObsidianMarkdownWithPulledImages(app, normalizePulledMarkdown(pageMarkdown.markdown), (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
   await app.vault.process(file, (existingMarkdown) =>
     replaceMarkdownBodyPreservingFrontmatter(existingMarkdown, nextBody, pageId)
   );

@@ -8,7 +8,7 @@
   Setting,
   type TFile
 } from "obsidian";
-import { extractNotionPageId, NotionApiError, NotionClient } from "./notionClient";
+import { extractNotionPageId, NotionApiError, NotionClient, NOTION_VERSION } from "./notionClient";
 import { pushCurrentFolderToNotion, pushEntireVaultToNotion, type FolderMapping } from "./sync/bulkPush";
 import { pullPagesFromNotion } from "./sync/pull";
 import { pushCurrentNoteToNotion } from "./sync/push";
@@ -39,8 +39,13 @@ import {
   type SyncBaseline,
   type SyncBaselineStore
 } from "./sync/baseline";
-import { normalizeNotionPageId } from "./sync/mapping";
+import { getNotionPageMapping, normalizeNotionPageId, removeNotionPageMappingFromMarkdown } from "./sync/mapping";
 import { SyncExecutionLock } from "./sync/runLock";
+import { runMediaCapabilityProbe } from "./sync/mediaCapabilityProbe";
+import { runMediaWriteBoundaryProbe } from "./sync/mediaWriteBoundaryProbe";
+import { runMediaRecoveryProbe } from "./sync/mediaRecoveryProbe";
+import { createMediaPushDryRun } from "./sync/mediaPush";
+import { runRemoteTreeTargetsDiagnostic } from "./sync/remoteTreeDiagnostic";
 
 interface LlmWikiSyncSettings {
   notionRootPageUrl: string;
@@ -66,7 +71,7 @@ const DEFAULT_SETTINGS: LlmWikiSyncSettings = {
 };
 
 const NOTION_TOKEN_SECRET_ID = "llm-wiki-sync-notion-api-token";
-const VERSION_LABEL = "v0.8.3";
+const VERSION_LABEL = "v0.9.0";
 
 interface SyncRunState {
   type: string | null;
@@ -84,6 +89,11 @@ interface FolderScopeOption {
 interface AdvancedToolOption {
   id:
     | "test-notion-connection"
+    | "run-grammar-probe"
+    | "run-media-capability-probe"
+    | "run-media-write-boundary-probe"
+    | "run-media-recovery-probe"
+    | "run-media-push-dry-run"
     | "push-current-folder"
     | "push-entire-vault"
     | "audit-current-folder"
@@ -113,15 +123,57 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
   async onload(): Promise<void> {
     await this.loadSettings();
     this.configureDebugLogging();
-    console.debug("[LLM Wiki Sync] v0.8.2 loaded");
+    console.debug("[LLM Wiki Sync] v0.9.0 loaded");
 
     this.addSettingTab(new LlmWikiSyncSettingTab(this.app, this));
+
+    console.warn("[LLM Wiki Sync][Diagnostic] registering command diagnose-remote-tree-targets");
+    this.addCommand({
+      id: "diagnose-remote-tree-targets",
+      name: "LLM Wiki Sync: Diagnose remote tree targets",
+      callback: () => {
+        console.warn("[LLM Wiki Sync][Diagnostic] callback invoked");
+        void this.runRemoteTreeTargetsDiagnostic();
+      }
+    });
 
     this.addCommand({
       id: "sync-current-note",
       name: "LLM Wiki Sync: Sync current note",
       callback: () => {
         void this.syncCurrentNote();
+      }
+    });
+
+    this.addCommand({
+      id: "run-media-capability-probe",
+      name: "LLM Wiki Sync: Run media capability probe (Advanced)",
+      callback: () => {
+        void this.runMediaCapabilityProbe();
+      }
+    });
+
+    this.addCommand({
+      id: "run-media-write-boundary-probe",
+      name: "LLM Wiki Sync: Run media write-boundary probe (Advanced)",
+      callback: () => {
+        void this.runMediaWriteBoundaryProbe();
+      }
+    });
+
+    this.addCommand({
+      id: "run-media-recovery-probe",
+      name: "LLM Wiki Sync: Run media recovery probe (Advanced)",
+      callback: () => {
+        void this.runMediaRecoveryProbe();
+      }
+    });
+
+    this.addCommand({
+      id: "run-media-push-dry-run",
+      name: "LLM Wiki Sync: Run media Push dry-run (Advanced)",
+      callback: () => {
+        void this.runMediaPushDryRun();
       }
     });
 
@@ -396,6 +448,163 @@ export default class LlmWikiSyncPlugin extends Plugin implements SyncBaselineSto
         resolveParentPageId: this.resolveParentPageIdForFile
       })
     );
+  }
+
+  async runNotionGrammarProbe(): Promise<void> {
+    const token = this.getNotionToken().trim();
+    const parentPageId = extractNotionPageId(this.settings.notionRootPageUrl.trim());
+    if (!token || !parentPageId) {
+      new Notice("LLM Wiki Sync: Missing Notion configuration.");
+      return;
+    }
+
+    const probeMarkdown = [
+      "# LLM Wiki Sync grammar probe",
+      "",
+      "Inline math A: $x^2$",
+      "Inline math B: $`x^2`$",
+      "",
+      "Display math:",
+      "$$",
+      "E = mc^2",
+      "$$",
+      "",
+      "> Multi-line quote first line",
+      "> second line",
+      "",
+      "- Parent item",
+      "\t- Nested item",
+      "\t\t- Deep item",
+      "",
+      "<callout icon=\"⚠️\" color=\"yellow_bg\">",
+      "\tKnown callout",
+      "</callout>",
+      "",
+      "<callout>",
+      "Attribute-free callout",
+      "</callout>",
+      "",
+      "<table header-row=\"true\">",
+      "<tr><td>Header</td><td>Value</td></tr>",
+      "<tr><td>One</td><td>Two</td></tr>",
+      "</table>"
+    ].join("\n");
+
+    try {
+      const client = new NotionClient({ token });
+      const page = await client.createChildPage({
+        parentPageId,
+        title: `LLM Wiki Sync Grammar Probe ${new Date().toISOString()}`,
+        markdown: probeMarkdown,
+        pushedAt: new Date()
+      });
+      const pulled = await client.retrievePageMarkdown(page.id);
+      const report = [
+        "# LLM Wiki Sync Notion Grammar Probe",
+        "",
+        `Page: ${page.url}`,
+        `Notion API version: ${NOTION_VERSION}`,
+        `Truncated: ${pulled.truncated}`,
+        `Unknown block IDs: ${pulled.unknownBlockIds.join(", ") || "none"}`,
+        "",
+        "## Outbound probe markdown",
+        "",
+        "```md",
+        probeMarkdown,
+        "```",
+        "",
+        "## Raw response markdown",
+        "",
+        "```md",
+        pulled.markdown,
+        "```",
+        ""
+      ].join("\n");
+      const reportPath = `.obsidian/plugins/${this.manifest.id}/grammar-probe.md`;
+      await this.app.vault.adapter.write(reportPath, report);
+      new Notice("LLM Wiki Sync: Grammar probe complete. Raw result saved in the plugin folder.");
+    } catch (error) {
+      console.error("LLM Wiki Sync: Grammar probe failed", getErrorMessage(error));
+      new Notice("LLM Wiki Sync: Grammar probe failed. Check the developer console.");
+    }
+  }
+
+  async runRemoteTreeTargetsDiagnostic(): Promise<void> {
+    await runRemoteTreeTargetsDiagnostic({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginId: this.manifest.id,
+      pluginVersion: this.manifest.version
+    });
+  }
+
+  async runMediaCapabilityProbe(): Promise<void> {
+    await runMediaCapabilityProbe({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
+    });
+  }
+
+  async runMediaWriteBoundaryProbe(): Promise<void> {
+    await runMediaWriteBoundaryProbe({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
+    });
+  }
+
+  async runMediaRecoveryProbe(): Promise<void> {
+    await runMediaRecoveryProbe({
+      app: this.app,
+      token: this.getNotionToken(),
+      rootPageUrl: this.settings.notionRootPageUrl,
+      pluginDir: this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`
+    });
+  }
+
+  async runMediaPushDryRun(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") {
+      new Notice("LLM Wiki Sync: Open a Markdown note first.");
+      return;
+    }
+    try {
+      const markdown = await this.app.vault.read(file);
+      const mapping = await getNotionPageMapping(this.app, file);
+      let remoteBody: string | undefined;
+      if (mapping.hasMapping) {
+        if (!mapping.pageId) throw new Error("The active note has an empty notion_page_id.");
+        remoteBody = (await new NotionClient({ token: this.getNotionToken() }).retrievePageMarkdown(mapping.pageId)).markdown;
+      }
+      const plan = await createMediaPushDryRun({
+        app: this.app,
+        file,
+        localBody: removeNotionPageMappingFromMarkdown(markdown),
+        remoteBody,
+        baselineImages: mapping.pageId ? this.getSyncBaseline(mapping.pageId)?.images ?? [] : []
+      });
+      const report = [
+        "# LLM Wiki Sync Media Push Dry Run",
+        "",
+        `Note: ${file.path}`,
+        `Mapped Notion page: ${mapping.pageId ?? "none (new page plan)"}`,
+        "",
+        "```json",
+        JSON.stringify(plan, null, 2),
+        "```",
+        ""
+      ].join("\n");
+      const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+      await this.app.vault.adapter.write(`${pluginDir}/media-push-dry-run.md`, report);
+      new Notice("LLM Wiki Sync: Media Push dry-run complete. No remote changes were made.");
+    } catch (error) {
+      console.error("LLM Wiki Sync: Media Push dry-run failed", error);
+      new Notice(`LLM Wiki Sync: Media Push dry-run failed: ${getErrorMessage(error)}`);
+    }
   }
 
   resolveParentPageIdForFile = async (file: TFile): Promise<string | null> => {
@@ -791,7 +1000,7 @@ function getPhaseName(phase: SyncProgress["phase"]): string {
 
 function formatProgressCounters(summary?: Partial<import("./sync/folderSync").FolderSyncSummary>): string {
   if (!summary) {
-    return "Created 0 · Updated 0 · Moved 0 · Conflicts 0 · Ambiguous 0 · Failed 0";
+    return "Created 0 · Updated 0 · Moved 0 · Conflicts 0 · Ambiguous 0 · Unsupported 0 · Failed 0";
   }
   return [
     `Created ${summary.created ?? 0}`,
@@ -802,6 +1011,7 @@ function formatProgressCounters(summary?: Partial<import("./sync/folderSync").Fo
     `Remote changed ${summary.remoteChanged ?? 0}`,
     `Conflicts ${summary.conflicts ?? 0}`,
     `Ambiguous ${summary.ambiguous ?? 0}`,
+    `Unsupported ${summary.unsupported ?? 0}`,
     `Failed ${summary.failed ?? 0}`
   ].join(" · ");
 }
@@ -947,6 +1157,31 @@ class AdvancedToolsModal extends FuzzySuggestModal<AdvancedToolOption> {
       description: "Check the saved Notion API token and root page."
     },
     {
+      id: "run-grammar-probe",
+      label: "Run Notion grammar probe",
+      description: "Create and retrieve a disposable Markdown probe under the configured root page."
+    },
+    {
+      id: "run-media-capability-probe",
+      label: "Run media capability probe",
+      description: "Verify the Notion file-upload API and save its raw response."
+    },
+    {
+      id: "run-media-write-boundary-probe",
+      label: "Run media write-boundary probe",
+      description: "Verify targeted Markdown updates preserve an attached image block."
+    },
+    {
+      id: "run-media-recovery-probe",
+      label: "Run media recovery probe",
+      description: "Test whether an existing Notion image can be recovered as a reusable File Upload."
+    },
+    {
+      id: "run-media-push-dry-run",
+      label: "Run media Push dry-run",
+      description: "Plan and validate image Push without changing Notion or sync state."
+    },
+    {
       id: "push-current-folder",
       label: "Push current folder to Notion",
       description: "Legacy one-way folder push."
@@ -1015,6 +1250,26 @@ class AdvancedToolsModal extends FuzzySuggestModal<AdvancedToolOption> {
   onChooseItem(option: AdvancedToolOption): void {
     if (option.id === "test-notion-connection") {
       void this.plugin.testNotionConnection();
+      return;
+    }
+    if (option.id === "run-grammar-probe") {
+      void this.plugin.runNotionGrammarProbe();
+      return;
+    }
+    if (option.id === "run-media-capability-probe") {
+      void this.plugin.runMediaCapabilityProbe();
+      return;
+    }
+    if (option.id === "run-media-write-boundary-probe") {
+      void this.plugin.runMediaWriteBoundaryProbe();
+      return;
+    }
+    if (option.id === "run-media-recovery-probe") {
+      void this.plugin.runMediaRecoveryProbe();
+      return;
+    }
+    if (option.id === "run-media-push-dry-run") {
+      void this.plugin.runMediaPushDryRun();
       return;
     }
     if (option.id === "push-current-folder") {

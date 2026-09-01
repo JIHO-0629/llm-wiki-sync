@@ -3,7 +3,8 @@ import {
   extractNotionPageId,
   NotionApiError,
   NotionClient,
-  NOTION_CREATE_PAGE_ENDPOINT
+  NOTION_CREATE_PAGE_ENDPOINT,
+  type CreatedNotionPage
 } from "../notionClient";
 import {
   compareSnapshotsToBaseline,
@@ -12,9 +13,12 @@ import {
   getRemoteSyncSnapshot,
   logBaselineNotAdvanced,
   logConflictState,
+  type SyncBaselineImage,
   type SyncBaselineStore
 } from "./baseline";
-import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, removeNotionPageMappingFromMarkdown, setNotionPageMapping } from "./mapping";
+import { findFilesMappedToPage, getNotionPageMapping, isContainerIndexFile, normalizePulledMarkdown, removeNotionPageMappingFromMarkdown, setNotionPageMapping } from "./mapping";
+import { areObsidianAndNotionBodiesEquivalent, assertSuccessfulConversion, detectRemoteWriteBlocker, prepareNotionMarkdownForWrite } from "./markdownConversion";
+import { containsLocalImage, createPageWithImages, updateMappedPageTextWithUnchangedImages } from "./mediaPush";
 
 export interface PushCurrentNoteOptions {
   app: App;
@@ -32,6 +36,7 @@ export type PushFileStatus =
   | "conflict"
   | "ambiguous"
   | "misplaced"
+  | "unsupported"
   | "failed";
 
 export interface PushFileResult {
@@ -200,6 +205,12 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
     return fail(options.file, "Push aborted - could not verify sync baseline.", options.pageId, error);
   }
 
+  const localHasImages = containsLocalImage(localSnapshot.body);
+  const remoteWriteBlocker = detectRemoteWriteBlocker(remoteSnapshot.body);
+  if (remoteWriteBlocker && !localHasImages) {
+    return unsupported(options.file, `Push refused: remote contains ${remoteWriteBlocker.construct} that v0.9 cannot reproduce.`, options.pageId);
+  }
+
   const change = compareSnapshotsToBaseline(baseline, localSnapshot, remoteSnapshot);
   logConflictState(options.runId, change.localChanged, change.remoteChanged, change.state);
   if (change.state === "CLEAN") {
@@ -231,9 +242,16 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
 
   try {
     console.debug(`${options.logPrefix} body update start`);
-    await options.client.updatePageMarkdown(options.pageId, localSnapshot.body);
+    if (localHasImages) {
+      const rawRemote = normalizePulledMarkdown((await options.client.retrievePageMarkdown(options.pageId)).markdown);
+      await updateMappedPageTextWithUnchangedImages({ app: options.app, file: options.file, localBody: localSnapshot.body, remoteBody: rawRemote, client: options.client, pageId: options.pageId, baselineImages: baseline.images });
+    } else {
+      const notionBody = assertSuccessfulConversion(prepareNotionMarkdownForWrite(localSnapshot.body), "Obsidian → Notion");
+      await options.client.updatePageMarkdown(options.pageId, notionBody);
+    }
     console.debug(`${options.logPrefix} body update result: success`);
   } catch (error) {
+    if (getErrorMessage(error).includes("conversion failed")) return unsupported(options.file, getErrorMessage(error), options.pageId, error);
     console.error(`${options.logPrefix} body update failed`, getErrorMessage(error));
     return fail(options.file, getUpdateErrorMessage(error), options.pageId, error);
   }
@@ -259,7 +277,7 @@ async function pushLinkedFileToNotion(options: PushFileToNotionOptions & {
       const nextRemoteSnapshot = await getRemoteSyncSnapshot(options.client, options.pageId);
       await options.baselineStore.saveSyncBaseline(
         options.pageId,
-        createSyncBaseline(options.pageId, nextLocalSnapshot, nextRemoteSnapshot)
+        createSyncBaseline(options.pageId, nextLocalSnapshot, nextRemoteSnapshot, baseline.images)
       );
       console.debug(`[LLM Wiki Sync][Baseline][${options.runId}] advanced`, options.pageId);
     } catch (baselineError) {
@@ -300,12 +318,15 @@ async function createFileInNotion(options: PushFileToNotionOptions & {
 
     const pushedAt = new Date();
     await options.client.getPage(options.parentPageId);
-    const createdPage = await options.client.createChildPage({
-      parentPageId: options.parentPageId,
-      title: options.noteTitle,
-      markdown: options.markdownBody,
-      pushedAt
-    });
+    let imageIdentities: SyncBaselineImage[] = [];
+    let createdPage: CreatedNotionPage;
+    if (containsLocalImage(options.markdownBody)) {
+      const createdWithImages = await createPageWithImages({ app: options.app, file: options.file, body: options.markdownBody, client: options.client, parentPageId: options.parentPageId, title: options.noteTitle, pushedAt });
+      createdPage = createdWithImages;
+      imageIdentities = createdWithImages.imageIdentities;
+    } else {
+      createdPage = await options.client.createChildPage({ parentPageId: options.parentPageId, title: options.noteTitle, markdown: assertSuccessfulConversion(prepareNotionMarkdownForWrite(options.markdownBody), "Obsidian → Notion"), pushedAt });
+    }
 
     console.debug("[LLM Wiki Sync][Create page] endpoint", NOTION_CREATE_PAGE_ENDPOINT);
     console.debug("[LLM Wiki Sync][Create page] parent page id", options.parentPageId);
@@ -319,7 +340,7 @@ async function createFileInNotion(options: PushFileToNotionOptions & {
       const nextRemoteSnapshot = await getRemoteSyncSnapshot(options.client, createdPage.id);
       await options.baselineStore.saveSyncBaseline(
         createdPage.id,
-        createSyncBaseline(createdPage.id, nextLocalSnapshot, nextRemoteSnapshot)
+        createSyncBaseline(createdPage.id, nextLocalSnapshot, nextRemoteSnapshot, imageIdentities)
       );
       console.debug(`[LLM Wiki Sync][Baseline][${options.runId}] initialized`, createdPage.id);
     } catch (baselineError) {
@@ -335,6 +356,7 @@ async function createFileInNotion(options: PushFileToNotionOptions & {
       message: "Pushed and linked to Notion."
     };
   } catch (error) {
+    if (getErrorMessage(error).includes("conversion failed")) return unsupported(options.file, getErrorMessage(error), undefined, error);
     return fail(options.file, getCreateErrorMessage(error), undefined, error);
   }
 }
@@ -354,7 +376,7 @@ async function tryAdoptExistingChildPage(options: PushFileToNotionOptions & {
 
   const localSnapshot = await getLocalSyncSnapshot(options.app, options.file);
   const remoteSnapshot = await getRemoteSyncSnapshot(options.client, candidates[0].id);
-  if (localSnapshot.fingerprint !== remoteSnapshot.fingerprint) {
+  if (!areObsidianAndNotionBodiesEquivalent(localSnapshot.body, remoteSnapshot.body) || localSnapshot.title !== remoteSnapshot.title) {
     return ambiguous(options.file, "AMBIGUOUS - same-title Notion page content differs from the local note.", candidates[0].id);
   }
 
@@ -415,6 +437,10 @@ function ambiguous(file: TFile, message: string, pageId?: string): PushFileResul
     pageId,
     message
   };
+}
+
+function unsupported(file: TFile, message: string, pageId?: string, error?: unknown): PushFileResult {
+  return { status: "unsupported", filePath: file.path, pageId, message, error };
 }
 
 function getUpdateErrorMessage(error: unknown): string {

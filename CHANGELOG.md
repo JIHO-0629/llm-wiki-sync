@@ -1,11 +1,18 @@
 # Changelog
 
+## 0.9.1
+
+- Corrected the public release package to match the verified v0.9 source and regression tests used by the active local plugin. This release supersedes the incomplete v0.9.0 package without changing sync-state compatibility.
+
 ## 0.9.0
 
-- Added the v0.9 Markdown conversion safety layer, including fail-closed handling for unsupported or malformed content.
-- Added bidirectional Notion callout conversion and lossless Notion table-of-contents transport markers.
-- Added conservative media identity, Pull, and Push support with regression coverage.
-- Preserved hierarchy safety, folder mapping ambiguity protection, and baseline conflict checks during Pull and Push.
+- Added a fail-closed Markdown conversion layer for Obsidian callouts, tables, highlights, underlines, and supported Notion block colors.
+- Added structural conversion validation and semantic cross-representation comparison without changing baseline schema or conflict logic.
+- Protected truncated Notion Markdown from snapshots, baselines, converters, and local writes.
+- Routed Push, Pull, container indexes, current-note Sync, and conflict resolution through conversion boundaries.
+- Hardened conversion parsing for real Notion table attributes, malformed fences, combined highlight/underline, safe metadata stripping, and unsupported-block degradation. Callout aliases such as `caution` intentionally canonicalize to `warning` on Pull.
+- Added a lossless neutral fallback for valid Notion callouts whose icon/color combination has no built-in Obsidian mapping. Private marker metadata restores the original icon and color on Push; malformed callouts and malformed markers remain blocked.
+- Final safety policy: v0.9 blocks Push when remote formatting cannot be reproduced and freezes notes containing unsupported semantic blocks (media, embeds, columns, tabs, databases, non-child page references, and related Notion objects). Preserve the remote content manually until dedicated support ships.
 
 ## 0.8.5
 

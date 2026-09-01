@@ -19,6 +19,8 @@ LLM Wiki Sync is an Obsidian desktop plugin for manual, safety-first synchroniza
 - Persisted synchronization baseline
 - Conflict detection
 - Explicit `Keep Obsidian` and `Keep Notion` resolution
+- Fail-closed Markdown conversion for supported Obsidian and Notion formatting
+- Experimental local image push for new pages and unchanged-image text updates
 - Filename and path safety checks
 - Duplicate mapping protection
 - Network and API failure safety
@@ -50,7 +52,7 @@ LLM Wiki Sync is available in the official Obsidian Community Plugins directory.
 4. Click `Install`.
 5. Click `Enable`.
 
-Current public release: **v0.9.0**.
+Current public release: **v0.9.1**.
 
 ### Manual Installation
 
@@ -143,21 +145,15 @@ After a successful resolution, the baseline is refreshed and the state returns t
 
 ## Advanced Commands
 
-Advanced commands remain available from the command palette:
+The command palette keeps the normal commands visible and groups troubleshooting workflows behind advanced pickers:
 
-- `Push to Notion`
-- `LLM Wiki Sync: Sync folder with Notion`
-- `LLM Wiki Sync: Sync entire vault with Notion`
-- `LLM Wiki Sync: Push current folder to Notion`
-- `LLM Wiki Sync: Push entire vault to Notion`
-- `LLM Wiki Sync: Audit current folder hierarchy`
-- `LLM Wiki Sync: Audit entire vault hierarchy`
-- `LLM Wiki Sync: Initialize current folder mappings`
-- `LLM Wiki Sync: Initialize entire vault mappings`
-- `Pull from Notion`
-- `Initialize sync baseline`
-- `Debug active mapping`
-- `Debug sync state`
+- `LLM Wiki Sync: Sync current note`
+- `LLM Wiki Sync: Push current note to Notion`
+- `LLM Wiki Sync: Pull from Notion`
+- `LLM Wiki Sync: Sync folder or vault...`
+- `LLM Wiki Sync: Advanced tools...`
+
+The advanced tools picker includes connection testing, grammar probing, media capability probes, media push dry-run, bulk push, hierarchy audit, mapping initialization, baseline initialization, debug mapping, and explicit conflict resolution.
 
 These are intended for troubleshooting, migration, and explicit manual control. `Sync current note` is the recommended normal workflow.
 
@@ -173,18 +169,35 @@ LLM Wiki Sync is designed to avoid silent overwrites:
 - Rename collisions stop the rename and do not overwrite files.
 - Filenames are sanitized for Windows/path safety and path traversal protection.
 - Failed API calls do not create a fake clean state.
+- Truncated Notion Markdown is skipped instead of being written locally or saved as a clean baseline.
+- Unsupported semantic blocks are refused instead of being flattened into lossy Markdown.
 - Bulk push processes files sequentially and continues after individual file failures.
 - Bulk push excludes `LLM Wiki Sync Pull/` and `LLM Wiki Sync Review/` by default to avoid pushing system copies as duplicate hierarchy.
 - Folder and vault sync use a run-scoped Notion API cache only for the active sync run. The cache is discarded afterward and invalidated after relevant mutations.
 
+## Markdown Conversion
+
+v0.9.0 adds explicit conversion boundaries between Obsidian Markdown and Notion's Markdown API. Supported callouts, tables, highlights, underlines, and Notion block colors are converted before writes and normalized after pulls. Unknown but valid Notion callout icon/color combinations pull as a neutral Obsidian callout with a private HTML comment that preserves the original values for Push round-trips.
+
+When content contains a Notion construct that cannot be reproduced safely, LLM Wiki Sync stops that operation and leaves both sides unchanged. This currently includes media, embeds, columns, tabs, databases, non-child page references, and related Notion objects unless covered by the image handling below.
+
+## Image Handling
+
+v0.9.0 includes experimental support for pushing local images in Markdown notes to Notion in narrow, safety-first cases:
+
+- Creating a new Notion page from a local note with supported local images.
+- Updating text around an already synced image set when the images, captions, order, and known remote identities are unchanged.
+- Running a media push dry-run from Advanced tools before making remote changes.
+
+The plugin refuses image changes it cannot preserve, including adding, removing, reordering, recaptioning, table-embedded images, width or alias modifiers, external images, unsupported image formats, and files that require multipart upload.
+
 ## Known Limitations
 
 - Sync is manual, not background or real-time.
-- v0.8.2 folder sync focuses on safe Obsidian-to-Notion hierarchy reconciliation plus baseline-protected note sync, with progress display and run-scoped performance caching.
-- Pull remains limited to its existing direct-child behavior and does not recreate recursive Notion hierarchy locally.
+- v0.9.0 folder sync focuses on safe hierarchy reconciliation plus baseline-protected note sync, with progress display and run-scoped performance caching.
 - Folder rename identity recovery is limited; a renamed folder with no stored mapping may be treated as a new folder.
 - There is no standalone page numbering system in this repository; `notion_page_id` and sync baselines remain the identity mechanisms.
-- Images and attachments are not synchronized.
+- General attachments and arbitrary Notion media are not synchronized.
 - Notion database/data-source synchronization is not supported.
 - Standalone `.yaml` and `.yml` files are not synchronized; Obsidian YAML frontmatter in Markdown notes is preserved for local mapping metadata.
 - Deletion synchronization is not implemented.
@@ -211,7 +224,7 @@ The local Obsidian plugin needs `main.js` to run. Treat `main.js` as a generated
 
 ## Version
 
-0.8.2
+0.9.0
 
 ## License
 

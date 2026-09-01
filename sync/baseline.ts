@@ -2,8 +2,16 @@ import { createHash } from "crypto";
 import type { App, TFile } from "obsidian";
 import type { NotionClient, NotionPageDetails, NotionPageMarkdown } from "../notionClient";
 import { normalizeNotionPageId, normalizePulledMarkdown, removeNotionPageMappingFromMarkdown } from "./mapping";
+import { extractNotionMediaStableId } from "./mediaIdentity";
 
 export const SYNC_STATE_VERSION = 1;
+
+export class TruncatedNotionMarkdownError extends Error {
+  constructor(public readonly unknownBlockIds: string[] = []) {
+    super("Notion Markdown was truncated and cannot be used for sync state.");
+    this.name = "TruncatedNotionMarkdownError";
+  }
+}
 
 export type SyncChangeState = "CLEAN" | "LOCAL_ONLY_CHANGED" | "REMOTE_ONLY_CHANGED" | "CONFLICT";
 
@@ -31,6 +39,14 @@ export interface SyncBaseline {
   remoteLastEditedTime: string;
   syncedAt: string;
   schemaVersion: 1;
+  images: SyncBaselineImage[];
+}
+
+export interface SyncBaselineImage {
+  localPath: string;
+  contentHash: string;
+  remoteStableId: string;
+  caption: string;
 }
 
 export interface SyncBaselineStore {
@@ -57,6 +73,9 @@ export async function getRemoteSyncSnapshot(client: NotionClient, pageId: string
 }
 
 export function getRemoteSyncSnapshotFromFetched(details: NotionPageDetails, markdown: NotionPageMarkdown): RemoteSyncSnapshot {
+  if (markdown.truncated) {
+    throw new TruncatedNotionMarkdownError(markdown.unknownBlockIds);
+  }
   const title = normalizeSyncTitle(details.title);
   const body = normalizeSyncBody(normalizePulledMarkdown(markdown.markdown));
   return {
@@ -67,7 +86,7 @@ export function getRemoteSyncSnapshotFromFetched(details: NotionPageDetails, mar
   };
 }
 
-export function createSyncBaseline(pageId: string, local: LocalSyncSnapshot, remote: RemoteSyncSnapshot): SyncBaseline {
+export function createSyncBaseline(pageId: string, local: LocalSyncSnapshot, remote: RemoteSyncSnapshot, images: SyncBaselineImage[] = []): SyncBaseline {
   return {
     notionPageId: pageId,
     localFingerprint: local.fingerprint,
@@ -77,7 +96,8 @@ export function createSyncBaseline(pageId: string, local: LocalSyncSnapshot, rem
     localMtime: local.mtime,
     remoteLastEditedTime: remote.lastEditedTime,
     syncedAt: new Date().toISOString(),
-    schemaVersion: SYNC_STATE_VERSION
+    schemaVersion: SYNC_STATE_VERSION,
+    images: images.map((image) => ({ ...image }))
   };
 }
 
@@ -119,8 +139,15 @@ export function validateSyncBaseline(value: unknown, pageId: string): SyncBaseli
   ) {
     return null;
   }
+  const images = baseline.images === undefined ? [] : baseline.images;
+  if (!Array.isArray(images) || !images.every((image) => isSyncBaselineImage(image))) return null;
+  return { ...baseline, images } as SyncBaseline;
+}
 
-  return baseline as SyncBaseline;
+function isSyncBaselineImage(value: unknown): value is SyncBaselineImage {
+  if (!value || typeof value !== "object") return false;
+  const image = value as Partial<SyncBaselineImage>;
+  return typeof image.localPath === "string" && typeof image.contentHash === "string" && typeof image.remoteStableId === "string" && typeof image.caption === "string";
 }
 
 export function shortFingerprint(fingerprint: string): string {
@@ -145,7 +172,34 @@ export function logBaselineNotAdvanced(runId: string, reason: string): void {
 
 export function normalizeSyncBody(body: string): string {
   const normalized = body.replace(/\r\n?/g, "\n");
-  return normalized.replace(/\n+$/g, "") + "\n";
+  return normalizeEphemeralNotionMediaUrlsForFingerprint(normalized.replace(/\n+$/g, "") + "\n");
+}
+
+const KNOWN_NOTION_MEDIA_HOST = "prod-files-secure.s3.us-west-2.amazonaws.com";
+
+/** Snapshot-only normalization for the signed S3 URLs verified by the media probe. */
+export function normalizeEphemeralNotionMediaUrlsForFingerprint(markdown: string): string {
+  return markdown.replace(/!\[[^\]\n]*\]\((https:\/\/[^\s()<>]+)\)/g, (match, destination: string) => {
+    let url: URL;
+    try {
+      url = new URL(destination);
+    } catch {
+      return match;
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== KNOWN_NOTION_MEDIA_HOST ||
+      !extractNotionMediaStableId(destination) ||
+      !url.searchParams.has("X-Amz-Algorithm") ||
+      !url.searchParams.has("X-Amz-Credential") ||
+      !url.searchParams.has("X-Amz-Date") ||
+      !url.searchParams.has("X-Amz-Expires") ||
+      !url.searchParams.has("X-Amz-Signature")
+    ) {
+      return match;
+    }
+    return match.replace(destination, `${url.protocol}//${url.hostname}${url.pathname}${url.hash}`);
+  });
 }
 
 function normalizeSyncTitle(title: string): string {

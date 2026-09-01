@@ -12,6 +12,8 @@ import {
   type RemoteSyncSnapshot,
   type SyncBaselineStore
 } from "./baseline";
+import { areObsidianAndNotionBodiesEquivalent, assertSuccessfulConversion, prepareObsidianMarkdownFromNotion } from "./markdownConversion";
+import { prepareObsidianMarkdownWithPulledImages } from "./mediaPull";
 import {
   createFrontmatterForNotionPage,
   CONTAINER_INDEX_ROLE,
@@ -117,16 +119,131 @@ export async function pullPagesFromNotion(options: PullPagesFromNotionOptions): 
         const pageDetails = await client.getPageDetails(childPage.id);
         const rawTitle = pageDetails.title || childPage.title;
         const pageMarkdown = await client.retrievePageMarkdown(childPage.id);
-        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
-        const cleanMarkdown = normalizePulledMarkdown(pageMarkdown.markdown);
-        const ownMarkdown = normalizePulledMarkdown(stripDirectChildPageReferences(pageMarkdown.markdown, childPage.directChildren));
-        const ownRemoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, { ...pageMarkdown, markdown: ownMarkdown });
         if (pageMarkdown.truncated) {
           console.warn(`${pageLog} Notion content truncated:`, pageMarkdown.unknownBlockIds);
-          new Notice("LLM Wiki Sync: Warning - Notion page content was truncated");
+          new Notice("LLM Wiki Sync: Truncated Notion content skipped; no local write or baseline update was made.");
+          counts.skipped += 1;
+          continue;
+        }
+        const rawOwnMarkdown = normalizePulledMarkdown(stripDirectChildPageReferences(pageMarkdown.markdown, childPage.directChildren));
+        const storedFolderPath = getStoredFolderPathForRemotePage(store, childPage.id, normalizedRootPageId);
+
+        // Resolve an already-mapped container before handling its own body. Its child pages
+        // have an unambiguous destination even when an unsupported body must stay untouched.
+        if (childPage.hasChildren && storedFolderPath.status === "matched") {
+          const expectedFolderPath = getExpectedMappedFolderPath(childPage, parentFolderPath, rootPageId, storedFolderPath.folderPath, rawTitle);
+          const folderPath = getMigratedLegacyPullPath(storedFolderPath.folderPath, expectedFolderPath);
+          if (normalizeVaultFolderPath(folderPath) !== normalizeVaultFolderPath(expectedFolderPath)) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: stale folder mapping path`, { stored: storedFolderPath.folderPath, expected: expectedFolderPath });
+            new Notice("LLM Wiki Sync: Stale folder mapping skipped.");
+            continue;
+          }
+
+          let legacyMappedNote: TFile | null = null;
+          if (mappedFiles.length === 1) {
+            const expectedIndexPath = normalizePath(`${storedFolderPath.folderPath}/${CONTAINER_INDEX_FILE}`);
+            if (isLegacyPullPath(mappedFiles[0].path)) {
+              legacyMappedNote = mappedFiles[0];
+            } else if (!(await isMappedContainerIndexFile(options.app, mappedFiles[0], expectedIndexPath))) {
+              folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+              blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              counts.skipped += 1;
+              console.warn(`${pageLog} skipped: page has both note mapping and folder mapping`);
+              new Notice("LLM Wiki Sync: Ambiguous note/folder mapping skipped.");
+              continue;
+            }
+          }
+
+          const folderResult = await ensureLocalFolder(options.app, folderPath);
+          if (folderResult === "created") counts.foldersCreated += 1;
+          if (folderResult === "file_collision" || folderResult === "failed") {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: stored folder mapping path is blocked`, folderPath);
+            continue;
+          }
+          if (store && normalizeVaultFolderPath(storedFolderPath.folderPath) !== normalizeVaultFolderPath(folderPath)) {
+            await migrateLegacyPullFolderMappingAfterSafePath(store, normalizedRootPageId, storedFolderPath.folderPath, folderPath, childPage.id);
+          }
+          const persistResult = await persistFolderMappingIfPossible(store, normalizedRootPageId, folderPath, childPage.id);
+          if (isAmbiguousPersistResult(persistResult)) {
+            folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+            blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+            counts.skipped += 1;
+            console.warn(`${pageLog} skipped: ambiguous folder mapping`, persistResult.reason);
+            new Notice("LLM Wiki Sync: Ambiguous folder mapping skipped.");
+            continue;
+          }
+          folderPathByPageId.set(normalizeNotionPageId(childPage.id), folderPath);
+
+          try {
+            const ownRemoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, { ...pageMarkdown, markdown: rawOwnMarkdown });
+            const ownMarkdown = await prepareObsidianMarkdownWithPulledImages(options.app, rawOwnMarkdown, (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
+            if (legacyMappedNote) {
+              const migrationResult = await migrateMappedNoteToContainerIndex({
+                app: options.app,
+                baselineStore: options.baselineStore,
+                mappedFile: legacyMappedNote,
+                folderPath,
+                pageId: childPage.id,
+                ownMarkdown,
+                remoteSnapshot: ownRemoteSnapshot,
+                directChildren: childPage.directChildren,
+                normalizedRootPageId,
+                store,
+                runId,
+                counts,
+                pageLog
+              });
+              if (migrationResult === "blocked") {
+                folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+                blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+                counts.skipped += 1;
+                console.warn(`${pageLog} skipped: mapped notes with children are ambiguous`);
+                new Notice("LLM Wiki Sync: Ambiguous mapped note with children skipped.");
+                continue;
+              }
+              counts.skipped += 1;
+              continue;
+            }
+
+            if (!isOwnContentEmpty(pageMarkdown.markdown, childPage.directChildren) || await hasValidContainerIndex(options.app, folderPath, childPage.id)) {
+              const indexResult = await upsertContainerIndex({
+                app: options.app,
+                baselineStore: options.baselineStore,
+                folderPath,
+                pageId: childPage.id,
+                ownMarkdown,
+                remoteSnapshot: ownRemoteSnapshot,
+                runId,
+                counts,
+                pageLog
+              });
+              if (indexResult === "blocked") {
+                folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
+                blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
+              }
+            }
+          } catch (error) {
+            counts.failed += 1;
+            console.error(`${pageLog} container body skipped; descendants will continue`, getErrorMessage(error));
+            new Notice("LLM Wiki Sync: Container body skipped; descendants will continue.");
+          }
+          counts.skipped += 1;
+          continue;
         }
 
-        const storedFolderPath = getStoredFolderPathForRemotePage(store, childPage.id, normalizedRootPageId);
+        const remoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, pageMarkdown);
+        const ownRemoteSnapshot = getRemoteSyncSnapshotFromFetched(pageDetails, { ...pageMarkdown, markdown: rawOwnMarkdown });
+        // Container bodies must use the child-reference-stripped representation; <page> is hierarchy transport, never note content.
+        const cleanSourceMarkdown = childPage.hasChildren ? rawOwnMarkdown : normalizePulledMarkdown(pageMarkdown.markdown);
+        const cleanMarkdown = await prepareObsidianMarkdownWithPulledImages(options.app, cleanSourceMarkdown, (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
+        const ownMarkdown = await prepareObsidianMarkdownWithPulledImages(options.app, rawOwnMarkdown, (text) => assertSuccessfulConversion(prepareObsidianMarkdownFromNotion(text), "Notion → Obsidian"));
+
         if (storedFolderPath.status === "ambiguous") {
           folderPathByPageId.set(normalizeNotionPageId(childPage.id), null);
           blockedSubtreePageIds.add(normalizeNotionPageId(childPage.id));
@@ -752,6 +869,7 @@ async function migrateMappedNoteToContainerIndex(options: {
     console.error(`${options.pageLog} mapped-note migration rollback after failure`, getErrorMessage(error));
     if (movedFile) {
       try {
+        // Rollback is byte-exact by design: originalContent must bypass every converter and normalizer.
         await options.app.vault.process(movedFile, () => originalContent);
         if (!options.app.vault.getAbstractFileByPath(originalPath)) {
           await options.app.fileManager.renameFile(movedFile, originalPath);
@@ -776,8 +894,7 @@ async function hasOnlyStructuralLegacyLocalChanges(options: {
   const markdown = await options.app.vault.read(options.mappedFile);
   const body = removeNotionPageMappingFromMarkdown(markdown);
   const localOwnBody = normalizeSyncBody(normalizePulledMarkdown(stripDirectChildPageReferences(body, options.directChildren)));
-  const remoteOwnBody = normalizeSyncBody(options.ownMarkdown);
-  return localOwnBody === remoteOwnBody;
+  return areObsidianAndNotionBodiesEquivalent(localOwnBody, options.ownMarkdown);
 }
 
 function createFrontmatterForContainerIndex(pageId: string): string {

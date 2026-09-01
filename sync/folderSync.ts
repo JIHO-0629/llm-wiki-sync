@@ -64,6 +64,7 @@ export interface FolderSyncSummary {
   uninitializedDivergence: number;
   orphanCandidates: number;
   movedToReview: number;
+  unsupported: number;
   failed: number;
   processed: number;
   total: number;
@@ -531,6 +532,7 @@ function applyPushResult(summary: FolderSyncSummary, result: PushFileResult): vo
   else if (result.status === "remote_changed") summary.remoteChanged += 1;
   else if (result.status === "conflict") summary.conflicts += 1;
   else if (result.status === "misplaced" || result.status === "ambiguous") summary.ambiguous += 1;
+  else if (result.status === "unsupported") summary.unsupported += 1;
   else summary.failed += 1;
   summary.details.push(`${result.status.toUpperCase()} ${result.filePath} - ${result.message}`);
 }
@@ -555,6 +557,7 @@ function createSummary(scopePath: string): FolderSyncSummary {
     uninitializedDivergence: 0,
     orphanCandidates: 0,
     movedToReview: 0,
+    unsupported: 0,
     failed: 0,
     processed: 0,
     total: 0,
@@ -585,6 +588,7 @@ function formatFolderSyncSummary(summary: FolderSyncSummary): string {
     `Orphan candidates:    ${summary.orphanCandidates}`,
     `Moved to Review:      ${summary.movedToReview}`,
     `Failed:               ${summary.failed}`,
+    `Unsupported:          ${summary.unsupported}`,
     `Duration:             ${formatDuration(summary.durationMs)}`,
     summary.cancelled ? "Cancelled:            yes" : "",
     "",
